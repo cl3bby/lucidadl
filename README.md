@@ -66,6 +66,53 @@ lucida setup
 Installing the package creates both `lucida` and `lucidadl`. If another application
 already owns the `lucida` command, use the `lucidadl` alias for every example below.
 
+## About this fork
+
+This is a personal fork of [Jude-A/lucidadl](https://github.com/Jude-A/lucidadl) with a
+couple of extras on top. Everything else works exactly like the original — if you just
+want the normal tool, use the upstream project (it's on PyPI as `lucidadl`).
+
+To install this fork instead:
+
+```bash
+pip install --force-reinstall git+https://github.com/cl3bby/lucidadl.git
+```
+
+The `--force-reinstall` matters because the version number stays the same as upstream's.
+Going back to the original is just `pip install --force-reinstall lucidadl==1.4.0`.
+
+### What's different here
+
+**Optional file-name templates.** You can pick where downloads go with small templates.
+Every slot is opt-in — anything you don't set keeps the normal
+`Artists/<Artist>/<Album>/` layout, and playlists stay under `Playlists/`.
+
+| Slot | Suggested shape |
+|---|---|
+| `album_folder` | `{artist}/Albums/{release_year} - {name}` |
+| `ep_folder` | `{artist}/EPs/{release_year} - {name}` |
+| `single_folder` | `{artist}/Singles/{release_year} - {name}` |
+| `track_folder` | `{artist}` |
+| `track_file` | `{track_number} - {name}` |
+| `playlist_folder` | `Playlists/{name}` |
+| `playlist_file` | `{track_number} - {artist} - {name}` |
+
+```bash
+lucida config --format album_folder="{artist}/Albums/{release_year} - {name}"
+lucida config --format-show       # every slot, the variables, a sample render
+lucida config --format-reset all  # back to the default layout
+lucida config --zfill off         # stop zero-padding track numbers (on by default)
+```
+
+The interactive menu has the same options under Settings → "File formats", with a table
+of the available variables. Albums are auto-detected as album/EP/single from track count
+and length, so a two-track album lands in `Singles/` and a seven-track one in `Albums/`.
+Playlist files keep their number prefix by default, so `.m3u8` ordering still works.
+
+**Clean track numbers.** Downloads that carry a `6/12` style embedded tracknumber get it
+rewritten to just `6` when the file is placed. Local transcodes inherit the fixed tag
+automatically.
+
 ## Three ways to download
 
 ### 1. A track or album
