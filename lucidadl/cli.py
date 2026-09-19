@@ -914,7 +914,9 @@ def _show_formats() -> None:
         except Exception:
             pass
     click.echo(f"  zfill: {'on' if zfill else 'off'} (zero-pad track numbers)")
-    click.echo("  Variables: " + ", ".join(formats.VARIABLES))
+    click.echo("  Variables (example value):")
+    for var, example in formats.variable_reference():
+        click.echo(f"    {var} ({example})" if example else f"    {var}")
     click.echo("  Folder templates may use / for nested folders; unset slots keep the "
                "built-in Artists/<Artist>/<Album>/ layout.")
 

@@ -584,10 +584,33 @@ def _edit_setting(key, s, console, questionary) -> None:
     console.print("[green]✓ Saved.[/]")
 
 
+def _print_variable_reference(console) -> None:
+    """The template variables and what they render to on a sample download, as a
+    compact two-pair table (same data the CLI shows with --format-show)."""
+    from rich.markup import escape
+    from rich.table import Table
+    pairs = formats.variable_reference()
+    half = (len(pairs) + 1) // 2
+    rows = list(zip(pairs[:half], pairs[half:] + [("", "")] * half))
+    table = Table(box=None, pad_edge=False, header_style="bold", title=(
+        "Template variables — use as {name}; a missing value renders empty"))
+    table.add_column("Variable", style="cyan", no_wrap=True)
+    table.add_column("Example value")
+    table.add_column("Variable", style="cyan", no_wrap=True)
+    table.add_column("Example value")
+    for (var, ex), (var2, ex2) in rows:
+        table.add_row(f"{{{var}}}", escape(ex), f"{{{var2}}}" if var2 else "",
+                      escape(ex2))
+    console.print(table)
+
+
 def _formats_menu(console, questionary) -> None:
     """Per-slot file-name templates: edit one row at a time, with a live sample render.
     Unset slots keep the built-in Artists/<Artist>/<Album>/ layout."""
     from questionary import Choice
+    console.print("[dim]Variables are shown as [bold]{{name}}[/] — press Enter on a "
+                  "slot to see what it can use.[/]")
+    _print_variable_reference(console)
     while True:
         fmts, zfill = paths.get_formats()
         choices = []
@@ -596,6 +619,7 @@ def _formats_menu(console, questionary) -> None:
             label = current if current else "default layout"
             choices.append(Choice(f"{slot}: {label}", slot))
         choices += [
+            Choice("📖  Show variable reference", "vars"),
             Choice(f"Zero-pad track numbers: {_onoff(zfill)}", "zfill"),
             Choice("Reset all slots to the default layout", "reset"),
             Choice("← Back", "back"),
@@ -606,6 +630,9 @@ def _formats_menu(console, questionary) -> None:
         ).ask()
         if pick in (None, "back"):
             return
+        if pick == "vars":
+            _print_variable_reference(console)
+            continue
         if pick == "zfill":
             paths.set_zfill(not zfill)
             console.print("[green]✓ Saved.[/]")
@@ -616,10 +643,14 @@ def _formats_menu(console, questionary) -> None:
             continue
         current = fmts.get(pick, "").strip()
         suggestion = current or formats.SLOT_SUGGESTIONS[pick]
+        try:  # show what the pre-filled template produces before it is edited
+            console.print(f"[dim]→   {formats.preview(pick, suggestion)}[/]")
+        except Exception:
+            pass
         value = questionary.text(
             f"{pick}:",
-            instruction=("(Enter keeps it; empty = back) — {artist}, {name}, "
-                         "{release_year}… ; / makes subfolders"),
+            instruction=("(Enter keeps it; empty = back) — the variables above; "
+                         "/ makes subfolders"),
             default=suggestion,
         ).ask()
         if not value or not value.strip():

@@ -468,6 +468,14 @@ check("preview: folder slot renders the release view",
       _fmt.preview("album_folder", "{artist}/{release_year} - {name}")
       == "Daft Punk/2001 - Discovery".replace("/", _os.sep))
 
+# variable reference: one (variable, example) pair per variable, same for CLI and TUI
+_ref = _fmt.variable_reference()
+check("variable reference: covers every variable exactly once",
+      [v for v, _ in _ref] == list(_fmt.VARIABLES))
+check("variable reference: examples come from the sample context",
+      dict(_ref) == {k: v for k, v in _fmt.sample_values().items()
+                     if k in _fmt.VARIABLES})
+
 # place_file integration: configured slots win, unset slots stay legacy, tags survive
 _d7 = tempfile.mkdtemp(prefix="lucidadl_fmt_")
 def _junk7(name):

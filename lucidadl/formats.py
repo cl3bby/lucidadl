@@ -335,6 +335,14 @@ def sample_values() -> Dict[str, str]:
     }
 
 
+def variable_reference() -> List[tuple]:
+    """(variable, example value) pairs for every usable template variable — the single
+    source the CLI's --format-show and the TUI's variable table both render, so the
+    two can't drift apart."""
+    sample = sample_values()
+    return [(var, sample.get(var, "")) for var in VARIABLES]
+
+
 def preview(slot: str, template: str) -> str:
     """What `template` in `slot` would produce for the sample context — folder slots
     render against the release/playlist view of {name}, file slots against the track

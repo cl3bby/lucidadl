@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format is based on
   `--format-reset`, a `--zfill` toggle, a "File formats" section in the interactive
   menu, and a live sample render while editing. Unset slots keep the built-in
   `Artists/<Artist>/<Album>/` layout, so nothing changes until a slot is configured.
+- Template variables are now documented in the tool itself: `--format-show` lists each
+  variable with an example value, and the interactive menu's File formats section shows
+  a variable/example table, can redisplay it on demand, and previews the pre-filled
+  template before editing.
 
 ### Fixed
 - Downloaded tracks carrying a composite embedded track number (`6/12`) now have it
