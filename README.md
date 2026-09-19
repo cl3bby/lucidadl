@@ -113,6 +113,11 @@ Playlist files keep their number prefix by default, so `.m3u8` ordering still wo
 rewritten to just `6` when the file is placed. Local transcodes inherit the fixed tag
 automatically.
 
+**Album links from any source.** Spotify, Apple Music, Deezer, and TIDAL album URLs work
+in batch files and the album command — the artist and album title are read from the
+public page and searched on Qobuz/Amazon, just like playlist tracks. YouTube and
+SoundCloud links were already covered by the playlist flow.
+
 ## Three ways to download
 
 ### 1. A track or album

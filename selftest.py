@@ -426,6 +426,78 @@ check("amazon placement: year and padded number render end to end",
           "/m/Daft Punk/Albums/2013 - Random Access Memories")
       and _amz_tp[1] == "01 - Give Life Back to Music.flac")
 
+# cross-service album links: source-service album URLs are read for artist + album
+# title and searched on Qobuz/Amazon like playlist tracks already are
+from lucidadl.api import (LucidaError as _LucidaError, album_source_kind as _askind,
+                          _spotify_album_from_html as _sp_alb,
+                          _deezer_album_from_obj as _dz_alb,
+                          _apple_album_from_html as _am_alb,
+                          _tidal_album_from_html as _td_alb)
+
+
+def _alb_raises(fn, *args):
+    try:
+        fn(*args)
+        return False
+    except _LucidaError:
+        return True
+    except Exception:
+        return False
+
+
+check("album link classifier: sources yes, playlists/qobuz/text no",
+      _askind("https://open.spotify.com/album/31AmEGVrF05ISPMWLNmvRs") == "spotify"
+      and _askind("https://play.spotify.com/album/x") == "spotify"
+      and _askind("https://www.deezer.com/album/787802631") == "deezer"
+      and _askind("https://music.apple.com/us/album/film-noir-fin/6771926745") == "apple"
+      and _askind("https://tidal.com/browse/album/161314") == "tidal"
+      and _askind("https://tidal.com/album/161314") == "tidal"
+      and _askind("https://open.spotify.com/playlist/abc") == ""
+      and _askind("https://play.qobuz.com/album/123") == ""
+      and _askind("Faouzia - UNETHICAL") == "")
+
+_sp_entity = {'type': 'album', 'name': "My Heart's Grave", 'subtitle': 'Faouzia',
+              'trackList': [{'title': "My Heart's Grave", 'subtitle': 'Faouzia'}]}
+_sp_html = ('<script id="__NEXT_DATA__" type="application/json">'
+            + __import__("json").dumps(
+                {'props': {'pageProps': {'state': {'data': {'entity': _sp_entity}}}}})
+            + '</script>')
+_sp_html_playlist = ('<script id="__NEXT_DATA__" type="application/json">'
+                     + __import__("json").dumps(
+                         {'props': {'pageProps': {'state': {'data': {'entity': dict(
+                             _sp_entity, type='playlist')}}}}})
+                     + '</script>')
+check("spotify album extractor: artist + album from the embed payload",
+      _sp_alb(_sp_html) == ('Faouzia', "My Heart's Grave"))
+check("spotify album extractor: falls back to the first track's subtitle",
+      _sp_alb(_sp_html.replace("'subtitle': 'Faouzia', 'trackList'",
+                               "'trackList'", 1)) == ('Faouzia', "My Heart's Grave"))
+check("spotify album extractor: non-album entity and missing payload rejected",
+      _alb_raises(_sp_alb, _sp_html_playlist)
+      and _alb_raises(_sp_alb, "<html>no payload</html>"))
+
+check("deezer album extractor: artist obj + title, error objects rejected",
+      _dz_alb({'id': 787802631, 'title': 'UNETHICAL',
+               'artist': {'name': 'Faouzia'}}) == ('Faouzia', 'UNETHICAL')
+      and _alb_raises(_dz_alb, {'error': {'message': 'no data'}})
+      and _alb_raises(_dz_alb, {'title': 'no artist here'}))
+
+_am_html = ('<meta property="og:title" '
+            'content="FILM NOIR (fin) by Faouzia on Apple Music">')
+check("apple album extractor: og:title splits on the last ' by '",
+      _am_alb(_am_html) == ('Faouzia', 'FILM NOIR (fin)'))
+check("apple album extractor: album names containing ' by ' survive",
+      _am_alb(_am_html.replace('FILM NOIR (fin)', 'Stand by Me')) ==
+      ('Faouzia', 'Stand by Me'))
+check("apple album extractor: missing og:title rejected",
+      _alb_raises(_am_alb, '<html>nothing</html>'))
+
+check("tidal album extractor: og:title 'Artist - Album'",
+      _td_alb('<meta property="og:title" content="Massive Attack - Mezzanine">')
+      == ('Massive Attack', 'Mezzanine'))
+check("tidal album extractor: missing og:title rejected",
+      _alb_raises(_td_alb, '<html>nothing</html>'))
+
 import io as _io
 import contextlib as _ctx
 

@@ -311,8 +311,23 @@ async def _run(items: List[str], kind: str, service: str, country: Optional[str]
         async def _acquire():
             return await acquire_clearance(hidden=hidden)
 
+        async def _fetch_album_page(fetch_url: str) -> str:
+            """Browser fallback for public album pages that resist plain HTTP (Apple).
+            Only opened when the static read fails."""
+            log("  (opening the browser to read the album page…)")
+            async with lucida_context(headless=True) as ctx:
+                page = await get_page(ctx)
+                try:
+                    await page.goto(fetch_url, wait_until="domcontentloaded",
+                                    timeout=60_000)
+                except Exception as e:
+                    log(f"  album page navigation: {e}")
+                await page.wait_for_timeout(1500)
+                return await page.content()
+
         client = LucidaClient(cf, ua, acquire=_acquire, country=cc, downscale=downscale,
-                              metadata=True, jobs=jobs, log=log)
+                              metadata=True, jobs=jobs, log=log,
+                              page_fetch=_fetch_album_page)
         await client.start_http()
         log(f"Downloading {len(items)} item(s) — {jobs} in parallel (no browser)…")
         try:

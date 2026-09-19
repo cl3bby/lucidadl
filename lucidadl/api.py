@@ -137,6 +137,36 @@ def is_apple_playlist_url(url: str) -> bool:
     return playlist_source(url) == "apple"
 
 
+def album_source_kind(url: str) -> str:
+    """The source service behind a public ALBUM page URL, for albums that lucida cannot
+    download from directly (spotify/apple/deezer/tidal). Such links are read for their
+    artist and album title and then searched on Qobuz/Amazon, exactly like playlist
+    tracks already are. Returns '' for playlist links (playlist_source's job), for
+    Qobuz/Amazon links (lucida takes those directly) and for anything else."""
+    parsed = urlparse((url or "").strip())
+    host = (parsed.hostname or "").lower()
+    parts = [part.lower() for part in parsed.path.split("/") if part]
+    if host in ("open.spotify.com", "play.spotify.com") and "album" in parts:
+        return "spotify"
+    if (host == "deezer.com" or host.endswith(".deezer.com")) and "album" in parts:
+        return "deezer"
+    if (host == "music.apple.com" or host.endswith(".music.apple.com")) and \
+            "album" in parts:
+        return "apple"
+    if (host == "tidal.com" or host.endswith(".tidal.com")) and "album" in parts:
+        return "tidal"
+    return ""
+
+
+def _resource_id(url: str, marker: str) -> str:
+    """The path segment right after `marker` ('/album/<id>')."""
+    parts = [part for part in urlparse((url or "").strip()).path.split("/") if part]
+    for index, part in enumerate(parts[:-1]):
+        if part.lower() == marker:
+            return parts[index + 1]
+    return ""
+
+
 def _playlist_id(url: str) -> str:
     parts = [part for part in urlparse((url or "").strip()).path.split("/") if part]
     for index, part in enumerate(parts[:-1]):
@@ -151,7 +181,8 @@ class LucidaClient:
     def __init__(self, cf_clearance: Optional[str], user_agent: str,
                  acquire: Optional[Callable[[], Awaitable[Tuple[str, str]]]] = None,
                  country: str = "US", downscale: str = "original", metadata: bool = True,
-                 private: bool = False, jobs: int = 6, log=print):
+                 private: bool = False, jobs: int = 6, log=print,
+                 page_fetch: Optional[Callable[[str], Awaitable[str]]] = None):
         self.cf = cf_clearance
         self.ua = user_agent
         self.acquire = acquire           # async () -> (cf, ua), opens a browser briefly
@@ -161,6 +192,9 @@ class LucidaClient:
         self.private = private
         self.jobs = jobs
         self.log = log
+        # Optional async (url) -> html fallback for reading public pages that resist
+        # plain HTTP (Apple album pages); downloads still never need it.
+        self.page_fetch = page_fetch
         self.http = None
         self._claimed = set()
         self._refresh_lock = asyncio.Lock()
@@ -783,6 +817,129 @@ async def tidal_tracklist(url: str, log=print) -> Tuple[str, List[Dict[str, str]
         # exposes the remaining public metadata, so the CLI switches to it.
         raise TidalPlaylistWindow(name)
     return name, tracks
+
+
+# --- public album pages (source-only services) --------------------------------
+#
+# lucida can only download from Qobuz/Amazon, so an album link from one of the source
+# services is read for just its artist + album title and then searched like any text
+# query. Only public, login-free data is used, same as the playlist extractors above.
+
+def _spotify_album_from_html(raw: str) -> Tuple[str, str]:
+    """(artist, album) from Spotify's public embed player for an album page."""
+    match = re.search(
+        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+        raw or "", re.I | re.S,
+    )
+    if not match:
+        raise LucidaError("Spotify's public album data was not found (page format changed?)")
+    try:
+        data = json.loads(html_lib.unescape(match.group(1)))
+        entity = data["props"]["pageProps"]["state"]["data"]["entity"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LucidaError(f"Spotify album data could not be read: {exc}") from exc
+    if not isinstance(entity, dict) or str(entity.get("type") or "").lower() != "album":
+        raise LucidaError("Spotify did not return a public album")
+    name = " ".join(str(entity.get("name") or entity.get("title") or "").split())
+    artist = " ".join(str(entity.get("subtitle") or "").replace("\xa0", " ").split())
+    if not artist:
+        for item in entity.get("trackList") or []:
+            if isinstance(item, dict) and item.get("subtitle"):
+                artist = " ".join(str(item["subtitle"]).replace("\xa0", " ").split())
+                break
+    if not name or not artist:
+        raise LucidaError("Spotify's public album page had no artist or title")
+    return artist, name
+
+
+def _deezer_album_from_obj(data: Any) -> Tuple[str, str]:
+    """(artist, album) from Deezer's public API album object."""
+    if not isinstance(data, dict):
+        raise LucidaError("Deezer returned unreadable album data")
+    if isinstance(data.get("error"), dict):
+        message = data["error"].get("message") or "album unavailable"
+        raise LucidaError(f"Deezer: {message}")
+    artist_obj = data.get("artist") if isinstance(data.get("artist"), dict) else {}
+    artist = " ".join(str(artist_obj.get("name") or "").split())
+    name = " ".join(str(data.get("title") or "").split())
+    if not name or not artist:
+        raise LucidaError("Deezer's public album data had no artist or title")
+    return artist, name
+
+
+def _apple_album_from_html(raw: str) -> Tuple[str, str]:
+    """(artist, album) from Apple Music's server-rendered album page (og:title reads
+    '<Album> by <Artist> on Apple Music')."""
+    match = re.search(
+        r'<meta[^>]+property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']',
+        raw or "", re.I)
+    if not match:
+        match = re.search(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]*property=["\']og:title["\']',
+            raw or "", re.I)
+    if not match:
+        raise LucidaError("Apple Music's public album data was not found (page format changed?)")
+    label = html_lib.unescape(match.group(1))
+    label = re.sub(r"\s*on Apple Music\.?\s*$", "", " ".join(label.split()))
+    if " by " not in label:
+        raise LucidaError("Apple Music's public album page had no artist or title")
+    name, artist = (part.strip() for part in label.rsplit(" by ", 1))
+    if not artist or not name:
+        raise LucidaError("Apple Music's public album page had no artist or title")
+    return artist, name
+
+
+def _tidal_album_from_html(raw: str) -> Tuple[str, str]:
+    """(artist, album) from the SEO tags on TIDAL's public album page
+    (og:title reads '<Artist> - <Album>')."""
+    match = re.search(
+        r'property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', raw or "", re.I)
+    if not match:
+        match = re.search(
+            r'content=["\']([^"\']+)["\'][^>]*property=["\']og:title["\']', raw or "",
+            re.I)
+    if not match:
+        raise LucidaError("TIDAL's public album data was not found (page format changed?)")
+    label = " ".join(html_lib.unescape(match.group(1)).split())
+    if " - " not in label:
+        raise LucidaError("TIDAL's public album page had no artist or title")
+    artist, name = (part.strip() for part in label.split(" - ", 1))
+    if not artist or not name:
+        raise LucidaError("TIDAL's public album page had no artist or title")
+    return artist, name
+
+
+async def album_identity_from_url(url: str, page_fetch=None) -> Tuple[str, str]:
+    """(artist, album title) for a public album page from a source-only service, used
+    to search the release on Qobuz/Amazon. `page_fetch` (an async callable returning
+    the rendered page HTML) is the optional browser fallback for Apple, whose static
+    page occasionally arrives without the SEO tags. Raises LucidaError when the page
+    cannot be read."""
+    kind = album_source_kind(url)
+    if not kind:
+        raise LucidaError("not a supported album page URL")
+    if kind == "apple":
+        try:
+            response = await _public_get(url)
+            return _apple_album_from_html(response.text)
+        except Exception:
+            if page_fetch is None:
+                raise
+        try:
+            return _apple_album_from_html(await page_fetch(url))
+        except Exception as exc:
+            raise LucidaError(f"Apple album page could not be read: {exc}") from exc
+    album_id = _resource_id(url, "album")
+    if not album_id:
+        raise LucidaError(f"{kind.capitalize()} album ID not found in the URL")
+    if kind == "spotify":
+        response = await _public_get(f"https://open.spotify.com/embed/album/{album_id}")
+        return _spotify_album_from_html(response.text)
+    if kind == "deezer":
+        response = await _public_get(f"https://api.deezer.com/album/{album_id}")
+        return _deezer_album_from_obj(response.json())
+    response = await _public_get(f"https://tidal.com/browse/album/{album_id}")
+    return _tidal_album_from_html(response.text)
 
 
 def _amazon_playlist_from_html(raw: str) -> Tuple[str, List[Dict[str, str]]]:

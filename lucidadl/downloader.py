@@ -13,7 +13,8 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from . import formats, matching, organize, paths, progress, transcode, utils
-from .api import LucidaClient, LucidaError, FALLBACK_SERVICES, normalize_service, _long
+from .api import (LucidaClient, LucidaError, FALLBACK_SERVICES, normalize_service, _long,
+                  album_identity_from_url, album_source_kind)
 from .models import FailedItem
 
 
@@ -45,8 +46,29 @@ def _query_variants(line: str) -> List[str]:
 async def _resolve_url(client: LucidaClient, line: str, service: str, kind: str,
                        log, strict: bool = False, quiet: bool = False) -> Optional[str]:
     line = line.strip()
+    source_verified = False
     if line.lower().startswith("http"):
-        return line
+        # Album links from source-only services (Spotify/Apple/Deezer/TIDAL) can't be
+        # handed to lucida directly: read the public page for artist + album title and
+        # search the release on Qobuz/Amazon, like playlist tracks already are.
+        source = album_source_kind(line)
+        if not source:
+            return line
+        try:
+            artist, title = await album_identity_from_url(
+                line, page_fetch=getattr(client, "page_fetch", None))
+        except Exception as exc:
+            log(f"  ↳ couldn't read the {source} album page ({exc}) — use "
+                f"\"Artist - Album\" text or a Qobuz/Amazon URL instead")
+            return None
+        query = " - ".join(part for part in (artist, title) if part)
+        if not quiet:
+            log(f"  ↳ {source} album link → searching {query!r}")
+        line, kind = query, "album"
+        # The artist + title came from the source page itself, so identical-scoring
+        # editions (standard vs remaster vs deluxe) of the right album don't need the
+        # strict tie-breaker a plain text query gets.
+        source_verified = True
     services = [service]
     if not strict:
         for s in FALLBACK_SERVICES:
@@ -67,7 +89,8 @@ async def _resolve_url(client: LucidaClient, line: str, service: str, kind: str,
             url = matching.pick_best(
                 line, items, require_artist=(v_idx > 0),
                 min_score=5.5 if explicit_artist else None,
-                min_margin=0.25 if explicit_artist else 0.0,
+                min_margin=0.0 if source_verified
+                else (0.25 if explicit_artist else 0.0),
             )
             if not url:
                 uncertain = uncertain or explicit_artist

@@ -7,17 +7,11 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
-- Optional file-name templates: each of `album_folder`, `ep_folder`, `single_folder`,
-  `track_folder`, `track_file`, `playlist_folder`, and `playlist_file` can be set to a
-  `{variable}` template (e.g. `lucida config --format
-  album_folder="{artist}/Albums/{release_year} - {name}"`), with `--format-show`,
-  `--format-reset`, a `--zfill` toggle, a "File formats" section in the interactive
-  menu, and a live sample render while editing. Unset slots keep the built-in
-  `Artists/<Artist>/<Album>/` layout, so nothing changes until a slot is configured.
-- Template variables are now documented in the tool itself: `--format-show` lists each
-  variable with an example value, and the interactive menu's File formats section shows
-  a variable/example table, can redisplay it on demand, and previews the pre-filled
-  template before editing.
+- Album links from Spotify, Apple Music, Deezer, and TIDAL now work in batch files and
+  the album command: the release's artist and album title are read from the public page
+  (no login) and searched on Qobuz/Amazon, the same way playlist tracks already are.
+  Apple links fall back to a brief headless browser read when the static page is
+  missing its metadata.
 
 ### Fixed
 - Downloaded tracks carrying a composite embedded track number (`6/12`) now have it
