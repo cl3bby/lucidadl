@@ -384,6 +384,48 @@ check("kind_for_info: album page classified, track page not",
                           "tracks": [{"durationMs": 320000}] * 14}) == "album"
       and _fmt.kind_for_info({"type": "track"}) is None)
 
+# Amazon Music shapes (real page-data dump): same camelCase spellings as Qobuz, but no
+# upc/discNumber/explicit, and the standalone track carries its own releaseDate.
+from lucidadl.downloader import _track_meta as _tm_amz
+_amz_album = {
+    "type": "album", "title": "Random Access Memories",
+    "artists": [{"id": "A2Z", "name": "Daft Punk"}],
+    "releaseDate": "2013-05-17T00:00:00.000Z", "trackCount": 14,
+    "label": "Columbia", "id": "B00CRMWMZ0",
+    "tracks": [{"title": "Give Life Back to Music", "trackNumber": 1,
+                "durationMs": 275000, "isrc": "USQX91300101", "id": "B00CRMWNAE",
+                "artists": [{"name": "Daft Punk"}]}],
+}
+check("amazon album info: kind + durations in ms classify correctly",
+      _fmt.kind_for_info(_amz_album) == "album")
+_amz_meta = _tm_amz(_amz_album, _amz_album["tracks"][0], True)
+check("amazon _track_meta: year/number/total/label/isrc ok, absent upc/explicit empty",
+      _amz_meta["year"] == "2013-05-17T00:00:00.000Z"
+      and _amz_meta["track_number"] == "1" and _amz_meta["total_tracks"] == "14"
+      and _amz_meta["label"] == "Columbia" and _amz_meta["isrc"] == "USQX91300101"
+      and _amz_meta["album_id"] == "B00CRMWMZ0"
+      and _amz_meta["upc"] == "" and _amz_meta["explicit"] == "")
+_amz_track = {"type": "track", "title": "One More Time", "trackNumber": 1,
+              "releaseDate": "2000-11-13T00:00:00.000Z", "durationMs": 320000,
+              "isrc": "GBDUW0000053", "id": "B0064UPUDC",
+              "artists": [{"name": "Daft Punk"}],
+              "album": {"title": "Discovery", "id": "B0064UPU4G"}}
+_amz_meta2 = _tm_amz({}, _amz_track, False)
+check("amazon standalone: album sub-dict and the track's own releaseDate",
+      _amz_meta2["album"] == "Discovery" and _amz_meta2["album_id"] == "B0064UPU4G"
+      and _amz_meta2["year"] == "2000-11-13T00:00:00.000Z"
+      and _amz_meta2["track_number"] == "1")
+_amz_vals = _fmt.assemble_values(meta=_amz_meta, tags={}, kind="album")
+_amz_tp = _fmt.target_paths(
+    "/m", {"album_folder": "{artist}/Albums/{release_year} - {name}",
+           "track_file": "{track_number} - {name}"},
+    _amz_vals, kind="album", ext=".flac")
+check("amazon placement: year and padded number render end to end",
+      _amz_tp is not None
+      and _amz_tp[0].replace("\\", "/").endswith(
+          "/m/Daft Punk/Albums/2013 - Random Access Memories")
+      and _amz_tp[1] == "01 - Give Life Back to Music.flac")
+
 import io as _io
 import contextlib as _ctx
 
