@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import click
 
 from . import __version__
-from . import api, organize, paths, progress, transcode, utils
+from . import api, formats, organize, paths, progress, transcode, utils
 from .api import (LucidaClient, default_country, normalize_service, DOWNSCALE_CHOICES,
                   playlist_source, playlist_source_name, LUCIDA)
 from .downloader import preview_tracks, run_batch
@@ -876,11 +876,66 @@ def playlist_file_cmd(file, name, check_matches, service, country, downscale, ou
 
 # --- config -----------------------------------------------------------------
 
+def _parse_format_slot(spec: str) -> tuple:
+    """'slot=template' -> (slot, template); exits with a helpful message otherwise."""
+    slot, sep, template = spec.partition("=")
+    slot = slot.strip()
+    template = template.strip()
+    if not sep or slot not in formats.SLOTS:
+        click.secho(f"Unknown format slot: {slot!r}", fg="red")
+        click.echo(f"Valid slots: {', '.join(formats.SLOTS)}")
+        click.echo('Usage: lucida config --format track_file="{track_number} - {name}"')
+        raise click.exceptions.Exit(1)
+    if not template:
+        click.secho("Empty template — use --format-reset to remove a slot.", fg="red")
+        raise click.exceptions.Exit(1)
+    # some shells pass slot="template" with the quotes intact — strip one matched pair
+    if len(template) >= 2 and template[0] == template[-1] and template[0] in "\"'":
+        template = template[1:-1].strip()
+    if not template:
+        click.secho("Empty template — use --format-reset to remove a slot.", fg="red")
+        raise click.exceptions.Exit(1)
+    return slot, template
+
+
+def _show_formats() -> None:
+    """--format-show: every slot's state, suggestion, and live sample render."""
+    fmts, zfill = paths.get_formats()
+    click.echo(f"File formats ({paths.CONFIG_PATH}):")
+    for slot in formats.SLOTS:
+        current = fmts.get(slot, "").strip()
+        state = current if current else "(not set — default layout)"
+        click.secho(f"  {slot}", bold=True, nl=False)
+        click.echo(f": {state}")
+        click.secho(f"    e.g. {formats.SLOT_SUGGESTIONS[slot]}", fg="cyan")
+        try:
+            sample = current or formats.SLOT_SUGGESTIONS[slot]
+            click.secho(f"    →   {formats.preview(slot, sample)}", fg="green")
+        except Exception:
+            pass
+    click.echo(f"  zfill: {'on' if zfill else 'off'} (zero-pad track numbers)")
+    click.echo("  Variables: " + ", ".join(formats.VARIABLES))
+    click.echo("  Folder templates may use / for nested folders; unset slots keep the "
+               "built-in Artists/<Artist>/<Album>/ layout.")
+
+
 @cli.command("config")
 @click.option("--music", "music", default=None,
               help="Set the download folder (saved). E.g. \"D:/Music\".")
-def config_cmd(music):
-    """Show/edit the configuration (music folder, data paths)."""
+@click.option("--format", "format_slots", multiple=True,
+              metavar='SLOT="TEMPLATE"',
+              help='Set a file-name template slot, e.g. '
+                   '--format track_file="{track_number} - {name}". Repeatable. '
+                   '--format-show lists the slots and variables.')
+@click.option("--format-show", "format_show", is_flag=True,
+              help="Show every slot, its suggestion, and a sample render.")
+@click.option("--format-reset", "format_reset", default=None, metavar="SLOT|all",
+              help="Remove one slot's template (back to the default layout) or all of "
+                   "them with \"all\".")
+@click.option("--zfill", "zfill", type=click.Choice(["on", "off"]), default=None,
+              help="Zero-pad {track_number}/{playlist_position} (on by default).")
+def config_cmd(music, format_slots, format_show, format_reset, zfill):
+    """Show/edit the configuration (music folder, file formats, data paths)."""
     if music:
         newdir = paths.set_music_dir(music)
         try:
@@ -888,6 +943,32 @@ def config_cmd(music):
         except Exception as e:
             click.secho(f"⚠ couldn't create: {e}", fg="yellow")
         click.secho(f"✓ Music folder → {newdir}", fg="green")
+    for spec in format_slots:
+        slot, template = _parse_format_slot(spec)
+        paths.set_format_slot(slot, template)
+        click.secho(f"✓ {slot} = {template}", fg="green")
+        click.secho(f"  →   {formats.preview(slot, template)}", fg="green")
+    if format_reset:
+        if format_reset != "all" and format_reset not in formats.SLOTS:
+            click.secho(f"Unknown format slot: {format_reset!r}. "
+                        f"Valid: {', '.join(formats.SLOTS)}, or \"all\".", fg="red")
+            raise click.exceptions.Exit(1)
+        paths.reset_format_slot(format_reset)
+        click.secho(f"✓ reset {format_reset} — default layout restored",
+                    fg="green")
+    if zfill:
+        paths.set_zfill(zfill == "on")
+        click.secho(f"✓ zfill {'on' if zfill == 'on' else 'off'}", fg="green")
+    if format_show:
+        _show_formats()
+    _show_config_paths()
+    if not (music or format_slots or format_reset or zfill or format_show):
+        click.secho('Tip: `lucida config --music "D:/Music"` to change the folder '
+                    '(or the LUCIDADL_MUSIC variable); `--format-show` for the '
+                    'file-name templates.', fg="cyan")
+
+
+def _show_config_paths() -> None:
     click.echo(f"Music       : {paths.default_music_dir()}")
     click.echo(f"Data        : {paths.DATA_DIR}")
     click.echo(f"State/dedup : {paths.STATE_PATH}")
@@ -896,9 +977,6 @@ def config_cmd(music):
     click.echo(f"Playlist    : {paths.PLAYLIST_TEXT_PATH}")
     click.echo(f"Playlist run: {paths.PLAYLIST_RUN_PATH}")
     click.echo(f"Config      : {paths.CONFIG_PATH}")
-    if not music:
-        click.secho("Tip: `lucida config --music \"D:/Music\"` to change the folder "
-                    "(or the LUCIDADL_MUSIC variable).", fg="cyan")
 
 
 # --- setup / doctor / debug -------------------------------------------------

@@ -9,7 +9,7 @@ import shutil
 import zipfile
 from typing import Dict, List, Optional
 
-from . import utils
+from . import formats, utils
 from .api import _long
 
 AUDIO_EXT = {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".alac", ".aiff", ".aif"}
@@ -33,9 +33,9 @@ def mutagen_available() -> bool:
 
 
 def read_tags(path: str) -> Dict[str, str]:
-    """Best-effort read of artist/albumartist/album from embedded tags. Returns {} if
-    mutagen is unavailable or the file's tags can't be read (caller falls back to
-    API-supplied metadata, then to Unknown)."""
+    """Best-effort read of the embedded tags used for organization and file templates.
+    Returns {} if mutagen is unavailable or the file's tags can't be read (caller falls
+    back to API-supplied metadata, then to Unknown)."""
     if _mutagen is None:
         return {}
     try:
@@ -54,6 +54,11 @@ def read_tags(path: str) -> Dict[str, str]:
             "albumartist": first("albumartist"),
             "album": first("album"),
             "title": first("title"),
+            "year": first("date") or first("originaldate") or first("year"),
+            "tracknumber": first("tracknumber"),
+            "discnumber": first("discnumber"),
+            "totaltracks": first("tracktotal") or first("totaltracks"),
+            "totaldiscs": first("disctotal") or first("totaldiscs"),
         }
     except Exception:
         return {}
@@ -139,21 +144,38 @@ def _title_and_ext(basename: str, meta: Dict[str, str] = None,
 
 def place_file(path: str, music_root: str, collection: str = None,
                meta: Dict[str, str] = None, track_no: str = None,
-               prefer_meta_title: bool = True) -> str:
+               prefer_meta_title: bool = True, fmt: Dict = None) -> str:
     """Move a single audio file into <music_root>/Artists/<Artist>/<Album>/, or, when a
     `collection` (playlist name) is given, into <music_root>/Playlists/<collection>/.
     The artist prefix is stripped from the filename; playlist tracks are prefixed with
     `track_no` so they keep the playlist order instead of sorting alphabetically.
     `meta` (API artist/album) is the fallback used when embedded tags are missing.
-    A '6/12' style embedded tracknumber is rewritten to '6' (best-effort)."""
+    A '6/12' style embedded tracknumber is rewritten to '6' (best-effort).
+
+    `fmt` optionally carries the user's name templates: {"formats": config dict,
+    "zfill": bool, "kind": release kind}. Any configured slot overrides the built-in
+    layout for its part of the path; unset slots (or fmt=None) keep the exact legacy
+    behavior above."""
     title, ext = _title_and_ext(os.path.basename(path), meta, prefer_meta_title)
     if collection:
-        dest_dir = os.path.join(music_root, PLAYLISTS_DIR, utils.sanitize(collection))
+        legacy_dir = os.path.join(music_root, PLAYLISTS_DIR, utils.sanitize(collection))
         stem = f"{track_no} - {title}" if track_no else title
     else:
-        dest_dir = album_dir(os.path.join(music_root, ARTISTS_DIR), read_tags(path), meta)
+        legacy_dir = album_dir(os.path.join(music_root, ARTISTS_DIR), read_tags(path), meta)
         stem = title
-    final = _move_into(path, dest_dir, utils.sanitize_filename(stem + ext))
+    dest_dir, name = legacy_dir, utils.sanitize_filename(stem + ext)
+    if isinstance(fmt, dict) and formats.any_configured(fmt.get("formats")):
+        values = formats.assemble_values(
+            collection=collection or "", track_no=track_no or "", meta=meta,
+            tags=read_tags(path), kind=fmt.get("kind"),
+            zfill=bool(fmt.get("zfill", True)))
+        target = formats.target_paths(music_root, fmt.get("formats"), values,
+                                      kind=fmt.get("kind"), collection=collection or "",
+                                      ext=ext)
+        if target:
+            dest_dir = target[0] or dest_dir      # unset dir slot -> legacy folder
+            name = target[1] or name              # unset file slot -> legacy name
+    final = _move_into(path, dest_dir, name)
     fix_track_number(final)
     return final
 
@@ -216,16 +238,18 @@ def write_playlist_m3u(music_root: str, collection: str) -> Optional[str]:
 
 
 def process_download(path: str, music_root: str, collection: str = None,
-                     meta: Dict[str, str] = None, track_no: str = None) -> List[str]:
+                     meta: Dict[str, str] = None, track_no: str = None,
+                     fmt: Dict = None) -> List[str]:
     """Organize a finished download (single audio file or an album .zip).
-    Returns the final file paths. Removes the source zip after extraction."""
+    Returns the final file paths. Removes the source zip after extraction.
+    `fmt` (name templates) is passed through to place_file."""
     if path.lower().endswith(".zip"):
-        return _extract_and_place(path, music_root, collection, meta)
-    return [place_file(path, music_root, collection, meta, track_no)]
+        return _extract_and_place(path, music_root, collection, meta, fmt=fmt)
+    return [place_file(path, music_root, collection, meta, track_no, fmt=fmt)]
 
 
 def _extract_and_place(zip_path: str, music_root: str, collection: str = None,
-                       meta: Dict[str, str] = None) -> List[str]:
+                       meta: Dict[str, str] = None, fmt: Dict = None) -> List[str]:
     tmp = zip_path + ".extract"
     placed: List[str] = []
     covers: List[str] = []
@@ -240,7 +264,7 @@ def _extract_and_place(zip_path: str, music_root: str, collection: str = None,
                     # zip tracks: one album-level meta for all, so strip the artist from
                     # each file's own name rather than reusing the album title.
                     placed.append(place_file(fp, music_root, collection, meta,
-                                             prefer_meta_title=False))
+                                             prefer_meta_title=False, fmt=fmt))
                 elif ext in IMAGE_EXT:
                     covers.append(fp)
         # drop cover art into the album folder of the first placed track

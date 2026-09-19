@@ -360,6 +360,142 @@ if _org.mutagen_available():
           list(_mFile(_fp2, easy=True).get("tracknumber") or []) == ["3"])
     _sh.rmtree(_d6, ignore_errors=True)
 
+# file-format templates (opt-in; unset slots must keep the exact legacy layout)
+from lucidadl import formats as _fmt
+
+# release kind: album >= 7 tracks or > 30 min; single <= 3 tracks, < 30 min, no
+# 10-minute track; EP otherwise. Duration-less fallback: <=3 / 4-6 / >=7.
+check("kind: empty release -> None", _fmt.release_kind(0) is None)
+check("kind: 1-3 short tracks -> single",
+      _fmt.release_kind(1, [200000]) == "single"
+      and _fmt.release_kind(3, [200000, 210000, 220000]) == "single")
+check("kind: 9:59 track is a single, 10:00 is not",
+      _fmt.release_kind(1, [599000]) == "single"
+      and _fmt.release_kind(1, [600000]) == "ep")
+check("kind: 4-6 short tracks -> ep", _fmt.release_kind(4, [200000] * 4) == "ep"
+      and _fmt.release_kind(6, [200000] * 6) == "ep")
+check("kind: >30 min total -> album", _fmt.release_kind(6, [360000] * 6) == "album")
+check("kind: >= 7 tracks -> album", _fmt.release_kind(7, [100000] * 7) == "album")
+check("kind: no durations -> count fallback",
+      _fmt.release_kind(2) == "single" and _fmt.release_kind(5) == "ep"
+      and _fmt.release_kind(9) == "album")
+check("kind_for_info: album page classified, track page not",
+      _fmt.kind_for_info({"type": "album", "trackCount": "14",
+                          "tracks": [{"durationMs": 320000}] * 14}) == "album"
+      and _fmt.kind_for_info({"type": "track"}) is None)
+
+import io as _io
+import contextlib as _ctx
+
+# render: substitution, unknown vars dropped (with warning), no crashes on empties
+_vals = _fmt.sample_values()
+check("render: substitutes variables",
+      _fmt.render("{artist} - {name}", _vals) == "Daft Punk - One More Time")
+_err = _io.StringIO()
+with _ctx.redirect_stderr(_err):
+    _out = _fmt.render("{artist}/{nope} - {name}", _vals)
+check("render: unknown variable dropped with a one-time warning",
+      _out == "Daft Punk/ - One More Time" and "nope" in _err.getvalue())
+check("render: empty values render empty (no traceback)",
+      _fmt.render("{artist}", {}) == "")
+
+# assemble_values: meta beats tags beats fallbacks; zfill; playlist position fallback
+_v = _fmt.assemble_values(meta={"artist": "Meta Artist", "title": "T",
+                                "year": "2001-03-06", "track_number": "6",
+                                "total_tracks": "14"},
+                          tags={"artist": "Tag Artist", "album": "Tag Album"},
+                          kind="album")
+check("assemble: meta wins over tags, year reduced to the year",
+      _v["artist"] == "Meta Artist" and _v["album"] == "Tag Album"
+      and _v["release_year"] == "2001")
+check("assemble: zfill pads to total width",
+      _v["track_number"] == "06" and _v["total_tracks"] == "14")
+_v2 = _fmt.assemble_values(meta={"title": "T", "track_number": "12",
+                                 "total_tracks": "14"}, zfill=False)
+check("assemble: zfill off leaves bare numbers",
+      _v2["track_number"] == "12")
+_v3 = _fmt.assemble_values(meta={"title": "T"})
+check("assemble: missing identity values get Unknown fallbacks",
+      _v3["artist"] == "Unknown Artist" and _v3["release_year"] == "Unknown Year")
+_v4 = _fmt.assemble_values(meta={}, tags={"tracknumber": "6/12", "tracktotal": "12"},
+                           track_no="07", collection="My Mix")
+check("assemble: fraction tag parsed, playlist position used as fallback number",
+      _v4["track_number"] == "06" and _v4["playlist_position"] == "07"
+      and _v4["total_tracks"] == "12")
+_v5 = _fmt.assemble_values(meta={"explicit": "True", "isrc": "X"}, tags={})
+check("assemble: explicit flag and scalar passthrough",
+      _v5["explicit"] == "Explicit" and _v5["isrc"] == "X")
+
+# target_paths: slot selection, partial configuration, unset -> legacy (None)
+_base = _fmt.assemble_values(meta={"artist": "Daft Punk", "albumartist": "Daft Punk",
+                                   "album": "Discovery", "title": "One More Time",
+                                   "year": "2001", "track_number": "6",
+                                   "total_tracks": "14"}, tags={}, kind="album")
+_cfg = {"album_folder": "{artist}/Albums/{release_year} - {name}",
+        "track_file": "{track_number} - {name}"}
+_tp = _fmt.target_paths("/m", _cfg, _base, kind="album", ext=".flac")
+check("target_paths: album folder + padded track file",
+      _tp is not None
+      and _tp[0].replace("\\", "/").endswith("/m/Daft Punk/Albums/2001 - Discovery")
+      and _tp[1] == "06 - One More Time.flac")
+check("target_paths: no configured slot -> None (legacy path)",
+      _fmt.target_paths("/m", {}, _base, kind="album") is None
+      and _fmt.target_paths("/m", None, _base) is None
+      and not _fmt.any_configured({}))
+_tp2 = _fmt.target_paths("/m", {"single_folder": "{artist}/Singles/{name}"},
+                         _base, kind="single")
+check("target_paths: dir slot without file slot keeps the legacy name",
+      _tp2 is not None
+      and _tp2[0].replace("\\", "/").endswith("/m/Daft Punk/Singles/Discovery")
+      and _tp2[1] is None)
+_plv = _fmt.assemble_values(meta={"artist": "A", "title": "T"}, track_no="07",
+                            collection="My Mix")
+_tp3 = _fmt.target_paths("/m", {"playlist_folder": "Playlists/{name}",
+                                "playlist_file": "{track_number} - {artist} - {name}"},
+                         _plv, collection="My Mix", ext=".flac")
+check("target_paths: playlist slots keep order prefix and playlist folder",
+      _tp3 is not None
+      and _tp3[0].replace("\\", "/").endswith("/m/Playlists/My Mix")
+      and _tp3[1] == "07 - A - T.flac")
+check("target_paths: folder values sanitized per segment",
+      _fmt.target_paths("/m", {"track_folder": '{artist}/{album}'},
+                        dict(_base, album="AC/DC: Back"), ext=".flac")[0].count(":") == 0)
+
+# preview renders folder/file slots as the CLI shows them
+check("preview: file slot keeps the extension",
+      _fmt.preview("track_file", "{track_number} - {name}") == "06 - One More Time.flac")
+check("preview: folder slot renders the release view",
+      _fmt.preview("album_folder", "{artist}/{release_year} - {name}")
+      == "Daft Punk/2001 - Discovery".replace("/", _os.sep))
+
+# place_file integration: configured slots win, unset slots stay legacy, tags survive
+_d7 = tempfile.mkdtemp(prefix="lucidadl_fmt_")
+def _junk7(name):
+    p = _os.path.join(_d7, name)
+    with open(p, "wb") as fh:
+        fh.write(b"x")
+    return p
+_fmt_meta = {"artist": "Daft Punk", "albumartist": "Daft Punk", "album": "Discovery",
+             "title": "One More Time", "year": "2001", "track_number": "6",
+             "total_tracks": "14"}
+_fmt7 = {"formats": {"album_folder": "{artist}/Albums/{release_year} - {name}",
+                     "track_file": "{track_number} - {name}"},
+         "zfill": True, "kind": "album"}
+_pf7 = _org.place_file(_junk7("a.flac"), _d7, meta=_fmt_meta, fmt=_fmt7)
+check("place_file + fmt: templated album path and file name",
+      _pf7.replace("\\", "/").endswith("Daft Punk/Albums/2001 - Discovery/06 - One More Time.flac"))
+_pf8 = _org.place_file(_junk7("b.flac"), _d7, meta=_fmt_meta)
+check("place_file without fmt: exact legacy path",
+      _pf8.replace("\\", "/").endswith("Artists/Daft Punk/Discovery/One More Time.flac"))
+_pf9 = _org.place_file(_junk7("c.flac"), _d7, collection="Road Trip",
+                       meta={"artist": "A", "title": "T"}, track_no="03",
+                       fmt={"formats": {"playlist_file": "{track_number} - {name}"},
+                            "zfill": True, "kind": None})
+check("place_file + fmt: playlist file templated, unset folder slot stays legacy",
+      _os.path.dirname(_pf9).replace("\\", "/").endswith("Playlists/Road Trip")
+      and _os.path.basename(_pf9) == "03 - T.flac")
+_sh.rmtree(_d7, ignore_errors=True)
+
 # playlist .m3u8 sidecar: lists audio in track order, bare filenames, with EXTINF titles
 _d5 = tempfile.mkdtemp(prefix="lucidadl_m3u_")
 _plf = _os.path.join(_d5, "Playlists", "My Mix")
@@ -397,8 +533,8 @@ check("_join_artists skips nameless", _ja([{"name": "X"}, {"foo": 1}]) == "X")
 _m_alb = _tm({"title": "Californication", "artists": [{"name": "RHCP"}]},
              {"title": "Around the World", "artists": [{"name": "RHCP"}]}, True)
 check("_track_meta album: album-level artist + album title",
-      _m_alb == {"albumartist": "RHCP", "album": "Californication", "artist": "RHCP",
-                 "title": "Around the World"})
+      _m_alb["albumartist"] == "RHCP" and _m_alb["album"] == "Californication"
+      and _m_alb["artist"] == "RHCP" and _m_alb["title"] == "Around the World")
 # compilation: album-level artist used for ALL tracks (no per-track scatter)
 _m_va = _tm({"title": "VA Comp", "artists": [{"name": "Various Artists"}]},
             {"title": "Song", "artists": [{"name": "Some Performer"}]}, True)

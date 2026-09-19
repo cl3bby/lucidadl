@@ -12,7 +12,7 @@ import os
 import re
 from typing import Dict, List, Optional, Tuple
 
-from . import matching, organize, progress, transcode, utils
+from . import formats, matching, organize, paths, progress, transcode, utils
 from .api import LucidaClient, LucidaError, FALLBACK_SERVICES, normalize_service, _long
 from .models import FailedItem
 
@@ -98,19 +98,58 @@ def _join_artists(artists) -> str:
                      if isinstance(a, dict) and a.get("name"))
 
 
+def _first_of(*values) -> str:
+    """First usable value as a stripped string ('' otherwise). Structured values
+    (dicts/lists) are skipped; bools stringify ('True'/'False') so explicit flags
+    survive the trip to formats.assemble_values."""
+    for v in values:
+        if v is None or isinstance(v, (dict, list)):
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
 def _track_meta(info: Dict, t: Dict, is_album: bool) -> Dict[str, str]:
-    """API-derived artist/album fallback for organization when a file has no embedded
-    tags. For an ALBUM, every track uses the album-level artist + album title so the
-    whole album groups into ONE folder (never per-track artist → no compilation scatter).
-    For a single track, uses the track's own artist + its album."""
+    """API-derived metadata for organization and the optional file-name templates, used
+    when a file has no embedded tags. For an ALBUM, artist/album come from the album
+    level so the whole release groups into ONE folder (never per-track artist → no
+    compilation scatter); per-track fields (number, ISRC…) come from the track's own
+    dict. For a single track, uses the track's artist + its album. Everything is
+    best-effort and '' when unknown — lucida copies the source service's JSON verbatim
+    and field casing differs (Qobuz: releaseDate/trackNumber), so every lookup checks
+    the common spellings. formats.assemble_values layers embedded tags on top."""
     if is_album:
         who = _join_artists(info.get("artists"))
         album = info.get("title") or ""
+        src_album = info
     else:
         who = _join_artists(t.get("artists")) or _join_artists(info.get("artists"))
         alb = t.get("album") if isinstance(t.get("album"), dict) else None
         album = (alb.get("title") if alb else t.get("album")) or ""
-    return {"albumartist": who, "artist": who, "album": album, "title": t.get("title") or ""}
+        src_album = alb or {}
+    return {
+        "albumartist": who, "artist": who, "album": album, "title": t.get("title") or "",
+        "year": _first_of(src_album.get("releaseDate"), src_album.get("release_date"),
+                          src_album.get("date"), src_album.get("year"),
+                          t.get("releaseDate"), t.get("release_date"), t.get("year")),
+        "track_number": _first_of(t.get("trackNumber"), t.get("track_number"),
+                                  t.get("track"), t.get("index")),
+        "total_tracks": _first_of(src_album.get("trackCount"), src_album.get("track_count"),
+                                  src_album.get("tracksCount"), src_album.get("nb_tracks")),
+        "disc_number": _first_of(t.get("discNumber"), t.get("disc_number"),
+                                 t.get("disc")),
+        "track_id": _first_of(t.get("id")),
+        "album_id": _first_of(src_album.get("id")),
+        "isrc": _first_of(t.get("isrc")),
+        "upc": _first_of(src_album.get("upc")),
+        "label": _first_of(src_album.get("label")),
+        "catalog_number": _first_of(src_album.get("catalogNumber"),
+                                    src_album.get("catalog"), src_album.get("label_no")),
+        "explicit": _first_of(t.get("explicit"), src_album.get("explicit")),
+        "quality": _first_of(info.get("quality"), t.get("quality")),
+    }
 
 
 def _filesize_mb(path: Optional[str]) -> float:
@@ -159,13 +198,17 @@ async def _resolve_targets(client, line, kind, service, country, strict, log,
     info = pd.get("info", {}) or {}
     expiry = pd.get("tokenExpiry")
     is_album = info.get("type") == "album"
+    # Release kind (album/EP/single) is a property of the RELEASE, resolved once here
+    # and reused by every track's placement templates.
+    kind = formats.kind_for_info(info) if is_album else None
     targets = []
     for t in client.tracks_from_pd(pd):
         if t.get("producers", "x") is None or not t.get("url"):  # unavailable
             continue
         targets.append({"url": t["url"], "label": t.get("title") or line,
                         "csrf": t.get("csrf"), "csrfFallback": t.get("csrfFallback"),
-                        "expiry": expiry, "meta": _track_meta(info, t, is_album)})
+                        "expiry": expiry, "meta": _track_meta(info, t, is_album),
+                        "kind": kind})
     if not targets:
         return None
     if is_album:
@@ -203,8 +246,16 @@ async def preview_tracks(client: LucidaClient, items: List[str], service: str,
     return sorted(rows, key=lambda row: row["index"])
 
 
+def _formats_cfg() -> Dict:
+    """The user's name-template settings from config.json (loaded once per batch).
+    Absent slots mean 'not configured' → the built-in layout stays in effect."""
+    fmts, zfill = paths.get_formats()
+    return {"formats": fmts, "zfill": zfill}
+
+
 async def _download_target(client, state, target, country, out, dedup, organize_on,
-                           tx, reporter, totals, failed, lock, collection=None) -> None:
+                           tx, reporter, totals, failed, lock, collection=None,
+                           fmt_cfg=None) -> None:
     url, label = target["url"], target["label"]
     log = reporter.log
     # For a playlist, dedup is scoped to the playlist folder: a track already in
@@ -260,10 +311,16 @@ async def _download_target(client, state, target, country, out, dedup, organize_
     finals = [path]
     if organize_on:
         placed = None
+        # Only build a template context when the user configured at least one slot;
+        # otherwise organize runs the legacy path untouched.
+        fmt = None
+        if fmt_cfg and formats.any_configured(fmt_cfg.get("formats")):
+            fmt = {"formats": fmt_cfg.get("formats"), "zfill": fmt_cfg.get("zfill", True),
+                   "kind": target.get("kind")}
         try:
             placed = await asyncio.to_thread(
                 organize.process_download, path, out, collection, target.get("meta"),
-                target.get("track_no"))
+                target.get("track_no"), fmt)
         except Exception as e:
             log(f"  ⚠ organizing failed ({os.path.basename(path)}): {e}")
         if placed:
@@ -342,6 +399,7 @@ async def run_batch(client: LucidaClient, state: utils.State, items: List[str],
     failed: List[FailedItem] = []
     sem = asyncio.Semaphore(max(1, jobs))
     lock = asyncio.Lock()
+    fmt_cfg = _formats_cfg() if organize_on else None
 
     # Phase 1 — resolve + expand into a flat track list (one httpx GET per item).
     targets: List[Dict] = []
@@ -386,7 +444,7 @@ async def run_batch(client: LucidaClient, state: utils.State, items: List[str],
             try:
                 await _download_target(client, state, target, country, out, dedup,
                                        organize_on, tx, reporter, totals, failed, lock,
-                                       collection)
+                                       collection, fmt_cfg)
             except Exception as e:
                 log(f"  ✗ {target.get('label')}: {friendly_error(e)}")
                 async with lock:

@@ -112,6 +112,44 @@ def set_music_dir(path: str) -> str:
     return abspath
 
 
+# --- file-format template settings (opt-in per slot; see lucidadl.formats) ------
+
+def get_formats() -> tuple:
+    """(formats dict, zfill). Unset/invalid 'formats' comes back as {} — every slot
+    unset keeps the built-in layout."""
+    cfg = load_config()
+    fmt = cfg.get("formats")
+    return (fmt if isinstance(fmt, dict) else {}), bool(cfg.get("zfill", True))
+
+
+def set_format_slot(slot: str, template: str) -> None:
+    cfg = load_config()
+    cfg.setdefault("formats", {})[slot] = template
+    save_config(cfg)
+
+
+def reset_format_slot(slot: str) -> None:
+    """Remove one slot's template, or the whole 'formats' block for slot == 'all'.
+    Removing the last slot returns the library to the built-in layout."""
+    cfg = load_config()
+    fmt = cfg.get("formats")
+    if not isinstance(fmt, dict):
+        return
+    if slot == "all":
+        cfg.pop("formats", None)
+    else:
+        fmt.pop(slot, None)
+        if not fmt:
+            cfg.pop("formats", None)
+    save_config(cfg)
+
+
+def set_zfill(on: bool) -> None:
+    cfg = load_config()
+    cfg["zfill"] = bool(on)
+    save_config(cfg)
+
+
 def cwd(name: str) -> str:
     """A path in the current working directory (e.g. default batch inputs)."""
     return os.path.join(os.getcwd(), name)

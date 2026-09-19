@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Optional file-name templates: each of `album_folder`, `ep_folder`, `single_folder`,
+  `track_folder`, `track_file`, `playlist_folder`, and `playlist_file` can be set to a
+  `{variable}` template (e.g. `lucida config --format
+  album_folder="{artist}/Albums/{release_year} - {name}"`), with `--format-show`,
+  `--format-reset`, a `--zfill` toggle, a "File formats" section in the interactive
+  menu, and a live sample render while editing. Unset slots keep the built-in
+  `Artists/<Artist>/<Album>/` layout, so nothing changes until a slot is configured.
+
 ### Fixed
 - Downloaded tracks carrying a composite embedded track number (`6/12`) now have it
   rewritten to the bare number (`6`) after placement, so players and devices show a

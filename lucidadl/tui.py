@@ -12,7 +12,7 @@ import asyncio
 import os
 import sys
 
-from . import paths, transcode
+from . import formats, paths, transcode
 from .session import load_clearance
 
 _TO_NONE = "(none — keep the source format)"
@@ -68,6 +68,13 @@ def _to_label(s: dict) -> str:
     if s["to"] and s["bitrate"]:
         return f"{s['to']} @ {s['bitrate']}"
     return s["to"] or "original format (no transcoding)"
+
+
+def _formats_label() -> str:
+    """Settings-menu summary: how many name-template slots are customized."""
+    fmts, _ = paths.get_formats()
+    n = sum(1 for slot in formats.SLOTS if fmts.get(slot, "").strip())
+    return f"{n} customized" if n else "default"
 
 
 def _opts_line(s: dict) -> str:
@@ -508,6 +515,7 @@ def _settings_menu(s, console, questionary) -> None:
                 Choice(f"Keep the original FLAC: {_onoff(s['keep_orig'])}", "keep"),
                 Choice(f"Force re-download: {_onoff(s['force'])}", "force"),
                 Choice(f"Music folder: {paths.default_music_dir()}", "music"),
+                Choice(f"File formats: {_formats_label()}", "formats"),
                 Choice("← Back", "back"),
             ],
             qmark="⚙", instruction="(↑/↓, Enter ; Esc = back)",
@@ -570,4 +578,56 @@ def _edit_setting(key, s, console, questionary) -> None:
             os.makedirs(paths.default_music_dir(), exist_ok=True)
         except Exception:
             pass
+    elif key == "formats":
+        _formats_menu(console, questionary)
+        return
     console.print("[green]✓ Saved.[/]")
+
+
+def _formats_menu(console, questionary) -> None:
+    """Per-slot file-name templates: edit one row at a time, with a live sample render.
+    Unset slots keep the built-in Artists/<Artist>/<Album>/ layout."""
+    from questionary import Choice
+    while True:
+        fmts, zfill = paths.get_formats()
+        choices = []
+        for slot in formats.SLOTS:
+            current = fmts.get(slot, "").strip()
+            label = current if current else "default layout"
+            choices.append(Choice(f"{slot}: {label}", slot))
+        choices += [
+            Choice(f"Zero-pad track numbers: {_onoff(zfill)}", "zfill"),
+            Choice("Reset all slots to the default layout", "reset"),
+            Choice("← Back", "back"),
+        ]
+        pick = questionary.select(
+            "File formats — choose a slot to change:",
+            choices=choices, qmark="⚙", instruction="(↑/↓, Enter ; Esc = back)",
+        ).ask()
+        if pick in (None, "back"):
+            return
+        if pick == "zfill":
+            paths.set_zfill(not zfill)
+            console.print("[green]✓ Saved.[/]")
+            continue
+        if pick == "reset":
+            paths.reset_format_slot("all")
+            console.print("[green]✓ All slots back to the default layout.[/]")
+            continue
+        current = fmts.get(pick, "").strip()
+        suggestion = current or formats.SLOT_SUGGESTIONS[pick]
+        value = questionary.text(
+            f"{pick}:",
+            instruction=("(Enter keeps it; empty = back) — {artist}, {name}, "
+                         "{release_year}… ; / makes subfolders"),
+            default=suggestion,
+        ).ask()
+        if not value or not value.strip():
+            return
+        value = value.strip()
+        try:
+            console.print(f"[dim]→   {formats.preview(pick, value)}[/]")
+        except Exception:
+            pass
+        paths.set_format_slot(pick, value)
+        console.print("[green]✓ Saved.[/]")
