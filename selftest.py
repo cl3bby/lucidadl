@@ -498,6 +498,32 @@ check("tidal album extractor: og:title 'Artist - Album'",
 check("tidal album extractor: missing og:title rejected",
       _alb_raises(_td_alb, '<html>nothing</html>'))
 
+check("apple album extractor: Apple's kind suffix is stripped from the album name",
+      _am_alb('<meta property="og:title" '
+              'content="Girls! - Single by Ren on Apple Music">') == ('Ren', 'Girls!')
+      and _am_alb('<meta property="og:title" '
+                  'content="FILM NOIR (fin) - EP by Ren on Apple Music">')
+      == ('Ren', 'FILM NOIR (fin)'))
+check("apple album extractor: kind suffix is case-insensitive and suffix-free names "
+      "pass through",
+      _am_alb('<meta property="og:title" '
+              'content="Discovery - Album by Daft Punk on Apple Music">')
+      == ('Daft Punk', 'Discovery')
+      and _am_alb('<meta property="og:title" '
+                  'content="Random Access Memories by Daft Punk on Apple Music">')
+      == ('Daft Punk', 'Random Access Memories'))
+
+# page-data parse recovery: lucida has shipped blobs with junk after the JSON object;
+# the object itself is complete, so trimming back to it must rescue the data
+from lucidadl.api import _json5_object as _j5
+_good = '{"info": {"title": "X", "deep": {"a": [1, 2]}}, "n": null}'
+check("page data recovery: trailing junk after the object is trimmed away",
+      _j5(_good + "v")["info"]["title"] == "X")
+check("page data recovery: junk containing braces/strings doesn't confuse the scanner",
+      _j5(_good + 'var v = {"decoy": "}"}')["info"]["deep"]["a"] == [1, 2])
+check("page data recovery: an object that never closes stays an error",
+      _alb_raises(_j5, '{"info": {"unterminated": [1, 2'))
+
 import io as _io
 import contextlib as _ctx
 

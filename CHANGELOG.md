@@ -12,8 +12,14 @@ All notable changes to this project are documented here. The format is based on
   (no login) and searched on Qobuz/Amazon, the same way playlist tracks already are.
   Apple links fall back to a brief headless browser read when the static page is
   missing its metadata.
+- Apple album links drop Apple's "- Single"/"- EP"/"- Album" decoration and square
+  bracket groups like "[feat. ...]" before searching, since both tend to hide the
+  release from the download services' search.
 
 ### Fixed
+- Lucida's embedded page data is now recovered when it arrives with stray characters
+  after the JSON object, which intermittently aborted album downloads after a
+  successful search ("parse page data: Expected b'JSON5Value' ...").
 - Downloaded tracks carrying a composite embedded track number (`6/12`) now have it
   rewritten to the bare number (`6`) after placement, so players and devices show a
   clean position. Already-bare numbers are left untouched.

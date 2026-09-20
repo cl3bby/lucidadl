@@ -62,6 +62,10 @@ async def _resolve_url(client: LucidaClient, line: str, service: str, kind: str,
                 f"\"Artist - Album\" text or a Qobuz/Amazon URL instead")
             return None
         query = " - ".join(part for part in (artist, title) if part)
+        # Square-bracket noise like '[feat. Faouzia]' is real metadata but useless —
+        # often harmful — to the download services' search. The release's own tags and
+        # templates come from lucida's page data, so the query can stay lean.
+        query = re.sub(r"\s*\[[^\]]*\]", " ", query).strip()
         if not quiet:
             log(f"  ↳ {source} album link → searching {query!r}")
         line, kind = query, "album"

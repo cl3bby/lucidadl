@@ -296,8 +296,6 @@ class LucidaClient:
     # -- item page -> token + tracks ----------------------------------------
 
     async def fetch_page_data(self, svc_url: str, country: Optional[str] = None) -> Dict[str, Any]:
-        import pyjson5
-
         cc = country if country is not None else self.country
         params = {"url": svc_url}
         if cc:
@@ -307,7 +305,7 @@ class LucidaClient:
         if not blob:
             raise LucidaError(f"token not found (status {r.status_code}, format changed?)")
         try:
-            return pyjson5.loads(blob)
+            return _json5_object(blob)
         except Exception as e:
             raise LucidaError(f"parse page data: {e}")
 
@@ -869,7 +867,9 @@ def _deezer_album_from_obj(data: Any) -> Tuple[str, str]:
 
 def _apple_album_from_html(raw: str) -> Tuple[str, str]:
     """(artist, album) from Apple Music's server-rendered album page (og:title reads
-    '<Album> by <Artist> on Apple Music')."""
+    '<Album> by <Artist> on Apple Music'). Apple appends the release kind to the album
+    name ('Girls! - Single', 'FILM NOIR (fin) - Album') — it's not part of the title
+    and only pollutes the download services' search, so it is stripped."""
     match = re.search(
         r'<meta[^>]+property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']',
         raw or "", re.I)
@@ -884,6 +884,7 @@ def _apple_album_from_html(raw: str) -> Tuple[str, str]:
     if " by " not in label:
         raise LucidaError("Apple Music's public album page had no artist or title")
     name, artist = (part.strip() for part in label.rsplit(" by ", 1))
+    name = re.sub(r"\s+-\s+(single|ep|album)$", "", name, flags=re.I)
     if not artist or not name:
         raise LucidaError("Apple Music's public album page had no artist or title")
     return artist, name
@@ -1532,6 +1533,49 @@ def _between(text: str, start: str, end: str) -> Optional[str]:
     i += len(start)
     j = text.find(end, i)
     return text[i:j] if j > 0 else None
+
+
+def _balanced_object_end(text: str) -> Optional[int]:
+    """Index just past the first complete top-level {...} object in `text`, tracking
+    strings and escapes so braces inside them are ignored. None when the object never
+    closes. Used to recover page data that arrives with junk appended after the JSON."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth <= 0:
+                return index + 1
+    return None
+
+
+def _json5_object(blob: str) -> Dict[str, Any]:
+    """Parse a JSON5 object, tolerating junk appended after it (lucida's embedded page
+    data has occasionally shipped with trailing characters after the closing brace —
+    the object itself arrives complete, so trimming back to it recovers the data)."""
+    import pyjson5
+
+    try:
+        return pyjson5.loads(blob)
+    except Exception:
+        pass
+    end = _balanced_object_end(blob)
+    if end:
+        return pyjson5.loads(blob[:end])
+    raise LucidaError("page data did not contain a readable object")
 
 
 def _filename_from_cd(cd: str) -> Optional[str]:
