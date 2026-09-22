@@ -346,7 +346,8 @@ def variable_reference() -> List[tuple]:
 def preview(slot: str, template: str) -> str:
     """What `template` in `slot` would produce for the sample context — folder slots
     render against the release/playlist view of {name}, file slots against the track
-    view, exactly like target_paths does at download time."""
+    view, exactly like target_paths does at download time. Folder segments are joined
+    with the platform's separator so the preview looks like the real destination."""
     values = sample_values()
     if slot.endswith("_file"):
         return utils.sanitize_filename(render(template, values, source=slot) + ".flac")
@@ -355,4 +356,4 @@ def preview(slot: str, template: str) -> str:
         v["name"] = "My Playlist"
     else:
         v["name"] = values["album"]
-    return "/".join(path_segments(render(template, v, source=slot)))
+    return os.path.join(*path_segments(render(template, v, source=slot)))
