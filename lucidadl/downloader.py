@@ -11,9 +11,10 @@ import asyncio
 import os
 import re
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from . import formats, matching, organize, paths, progress, transcode, utils
-from .api import (LucidaClient, LucidaError, FALLBACK_SERVICES, normalize_service, _long,
+from .api import (LucidaClient, LucidaError, normalize_service, _long,
                   album_identity_from_url, album_source_kind)
 from .models import FailedItem
 
@@ -43,8 +44,25 @@ def _query_variants(line: str) -> List[str]:
     return uniq
 
 
+def _services_for(service: str) -> List[str]:
+    """The search tier for this run: 'auto' searches Qobuz then Amazon (Qobuz first —
+    its release structure fits this program better, Amazon covers what it lacks); an
+    explicit 'qobuz'/'amazon' searches exactly that service with no fallback."""
+    if normalize_service(service) == "auto":
+        return ["qobuz", "amazon"]
+    return [normalize_service(service)]
+
+
+def _effective_country(url: str, country: str) -> str:
+    """Direct Amazon URLs must not inherit Qobuz's country: lucida takes Amazon
+    without one (COUNTRY_DEFAULTS). The resolved URL's own provider decides, so
+    `auto` behaves identically to the explicit service for direct links."""
+    host = (urlparse(url).hostname or "").lower()
+    return "" if host.startswith("music.amazon.") else country
+
+
 async def _resolve_url(client: LucidaClient, line: str, service: str, kind: str,
-                       log, strict: bool = False, quiet: bool = False) -> Optional[str]:
+                       log, quiet: bool = False) -> Optional[str]:
     line = line.strip()
     source_verified = False
     if line.lower().startswith("http"):
@@ -73,11 +91,7 @@ async def _resolve_url(client: LucidaClient, line: str, service: str, kind: str,
         # editions (standard vs remaster vs deluxe) of the right album don't need the
         # strict tie-breaker a plain text query gets.
         source_verified = True
-    services = [service]
-    if not strict:
-        for s in FALLBACK_SERVICES:
-            if normalize_service(s) != normalize_service(service):
-                services.append(s)
+    services = _services_for(service)
     bucket = "albums" if kind == "album" else "tracks"
     variants = _query_variants(line)
     explicit_artist = " - " in line
@@ -216,12 +230,12 @@ def _existing_playlist_copy(state: utils.State, url: str, folder: str,
     return ""
 
 
-async def _resolve_targets(client, line, kind, service, country, strict, log,
+async def _resolve_targets(client, line, kind, service, country, log,
                            quiet=False) -> Optional[List[Dict]]:
-    url = await _resolve_url(client, line, service, kind, log, strict, quiet=quiet)
+    url = await _resolve_url(client, line, service, kind, log, quiet=quiet)
     if not url:
         return None
-    pd = await client.fetch_page_data(url, country)        # ONE httpx GET
+    pd = await client.fetch_page_data(url, _effective_country(url, country))  # ONE GET
     info = pd.get("info", {}) or {}
     expiry = pd.get("tokenExpiry")
     is_album = info.get("type") == "album"
@@ -253,7 +267,7 @@ async def preview_tracks(client: LucidaClient, items: List[str], service: str,
         try:
             async with sem:
                 targets = await _resolve_targets(
-                    client, line, "track", service, country, False, log, quiet=True
+                    client, line, "track", service, country, log, quiet=True
                 )
             if not targets:
                 return {"index": index, "query": line, "status": "not found"}
@@ -311,7 +325,8 @@ async def _download_target(client, state, target, country, out, dedup, organize_
     path, last_err = None, None
     for attempt in range(2):
         try:
-            handoff, server = await client.start_download(track, target["expiry"], country)
+            handoff, server = await client.start_download(
+                track, target["expiry"], _effective_country(url, country))
             path = await client.run_job(
                 handoff, server, _dest_dir(out, organize_on), utils.sanitize(label),
                 title=label,
@@ -412,7 +427,7 @@ async def _download_target(client, state, target, country, out, dedup, organize_
 async def run_batch(client: LucidaClient, state: utils.State, items: List[str],
                     kind: str, service: str, country: Optional[str], out: str,
                     jobs: int, dedup: bool, organize_on: bool = True,
-                    tx: Optional[Dict] = None, strict: bool = False,
+                    tx: Optional[Dict] = None,
                     collection: Optional[str] = None, reporter=None,
                     quiet_resolve: bool = False,
                     track_numbers: Optional[List[str]] = None
@@ -437,7 +452,7 @@ async def run_batch(client: LucidaClient, state: utils.State, items: List[str],
                     else f"{idx + 1:0{pad}d}")
         async with sem:
             try:
-                tg = await _resolve_targets(client, line, kind, service, country, strict,
+                tg = await _resolve_targets(client, line, kind, service, country,
                                             log, quiet=quiet_resolve)
             except Exception as e:
                 log(f"  ✗ resolving \"{line}\": {friendly_error(e)}")
