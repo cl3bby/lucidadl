@@ -200,8 +200,10 @@ def _exit_if_failed(result: RunResult) -> None:
 
 
 def _service_opts(f):
-    f = click.option("-s", "--service", default="qobuz",
-                     help="Source service (qobuz by default, amazon).")(f)
+    f = click.option("-s", "--service", default="auto",
+                     type=click.Choice(["auto", "qobuz", "amazon"]),
+                     help="Search tier: auto = Qobuz, then Amazon when Qobuz has no "
+                          "good match; qobuz/amazon = that service only.")(f)
     f = click.option("--country", default=None, help="Country code (def: US for qobuz).")(f)
     f = click.option("-F", "--format", "downscale", default="original",
                      type=click.Choice(DOWNSCALE_CHOICES),
@@ -496,21 +498,39 @@ async def _retry(items: List[FailedItem], service: str, country: Optional[str],
 
 async def _search_entries(query, service, hidden=False, country=None):
     """Run a search and return a flat list of (kind, item) entries (albums then tracks).
-    Shared by the CLI `search` prompt and the TUI's arrow-key picker."""
-    cc = country or default_country(service)
-    cf, ua = load_clearance()
-    if not (cf and ua):
-        cf, ua = await acquire_clearance(hidden=hidden)
-    client = LucidaClient(cf, ua, acquire=lambda: acquire_clearance(hidden=hidden),
-                          country=cc, log=click.echo)
-    await client.start_http()
-    try:
-        res = await client.search(query, service)
-    finally:
-        await client.aclose()
+    Shared by the CLI `search` prompt and the TUI's arrow-key picker. Catalogue search
+    talks to Qobuz/Amazon directly, so no lucida access is needed here — only the
+    eventual download of a picked item touches lucida.to."""
+    from .search import catalog_search, merge_entries
+
+    errors: List[Exception] = []
+
+    async def _one(name):
+        try:
+            return await catalog_search(query, name, log=click.echo)
+        except Exception as exc:
+            errors.append(exc)
+            click.echo(f"  ({name} search unavailable: {exc})")
+            return {"tracks": [], "albums": []}
+
+    if normalize_service(service) == "auto":
+        qobuz_res, amazon_res = await asyncio.gather(_one("qobuz"), _one("amazon"))
+        res = merge_entries(qobuz_res, amazon_res)
+        # "No results" is a legitimate outcome; "everything errored" is a failure the
+        # caller must see (it decides the exit code).
+        if not res["albums"] and not res["tracks"] and errors:
+            raise errors[0]
+    else:
+        res = await catalog_search(query, service, log=click.echo)
     entries = [("album", it) for it in (res.get("albums") or [])[:15]]
     entries += [("track", it) for it in (res.get("tracks") or [])[:15]]
     return entries
+
+
+def _svc_tag(item) -> str:
+    """' [amazon]' on rows that came from Amazon, so merged listings show the source."""
+    svc = item.get("service") or ""
+    return f" [{svc}]" if svc else ""
 
 
 async def _search(query, service, country, downscale, out, organize_on, jobs,
@@ -534,14 +554,14 @@ async def _search(query, service, country, downscale, out, organize_on, jobs,
         for it in albums:
             numbered.append(("album", it))
             click.echo(f"  {len(numbered):>2}. {it.get('title', '?')} — "
-                       f"{it.get('artist', '?')}")
+                       f"{it.get('artist', '?')}{_svc_tag(it)}")
     if tracks:
         click.secho("\nTracks:", fg="cyan")
         for it in tracks:
             numbered.append(("track", it))
             alb = f"  [{it.get('album', '')}]" if it.get("album") else ""
             click.echo(f"  {len(numbered):>2}. {it.get('title', '?')} — "
-                       f"{it.get('artist', '?')}{alb}")
+                       f"{it.get('artist', '?')}{alb}{_svc_tag(it)}")
     if not numbered:
         click.secho("No results.", fg="yellow")
         return {"ok": 0, "skip": 0, "fail": 1}, []
@@ -1159,14 +1179,13 @@ def doctor(live):
 async def _debug(query, service, country, item, headless):
     from urllib.parse import urlencode
 
+    if not item:
+        click.secho("debug: pass --item <URL> — lucida's /search page no longer "
+                    "exists (catalogue search is provider-side now).", fg="red")
+        return
     svc = normalize_service(service)
     cc = country or default_country(svc)
-    q = " ".join(query) or "red hot chili peppers"
-    if item:
-        target, tag = f"{LUCIDA}/?{urlencode({'url': item, 'country': cc})}", "item"
-    else:
-        target = f"{LUCIDA}/search?{urlencode({'service': svc, 'country': cc, 'query': q})}"
-        tag = "search"
+    target, tag = f"{LUCIDA}/?{urlencode({'url': item, 'country': cc})}", "item"
 
     async with lucida_context(headless=headless, downloads_dir=DEFAULT_OUT) as ctx:
         try:
@@ -1203,12 +1222,12 @@ async def _debug(query, service, country, item, headless):
 
 @cli.command("debug", hidden=True)
 @click.argument("query", nargs=-1)
-@click.option("-s", "--service", default="qobuz", help="Service to diagnose (def: qobuz).")
+@click.option("-s", "--service", default="auto", help="Search tier (for the country default).")
 @click.option("--country", default=None, help="Country code (def: US for qobuz).")
-@click.option("--item", default=None, help="Load this item URL instead of a search.")
+@click.option("--item", default=None, required=False, help="Load this item URL.")
 @click.option("--headless", is_flag=True, help="(dev) force headless, normally blocked by CF.")
 def debug_cmd(query, service, country, item, headless):
-    """(dev) Diagnostic: open a page, capture HTML + screenshot, keep the window open."""
+    """(dev) Diagnostic: load an item page, capture HTML + screenshot, keep the window."""
     asyncio.run(_debug(query, service, country, item, headless))
 
 

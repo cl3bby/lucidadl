@@ -16,7 +16,7 @@ from . import formats, paths, transcode
 from .session import load_clearance
 
 _TO_NONE = "(none — keep the source format)"
-_SERVICES = ["qobuz", "amazon"]
+_SERVICES = ["auto", "qobuz", "amazon"]
 # actions whose output is worth reading before the menu redraws (we pause after them)
 _PAUSE_AFTER = {"download", "playlist", "batch", "retry", "tools", "onboarding"}
 
@@ -450,7 +450,8 @@ def _search_action(s, console, cli, questionary, go) -> bool:
     for kind, it in entries:
         tag = "💿" if kind == "album" else "🎵"
         alb = f"  [{it.get('album')}]" if it.get("album") else ""
-        choices.append(Choice(f"{tag} {it.get('title', '?')} — {it.get('artist', '?')}{alb}",
+        svc = f"  · {it.get('service')}" if it.get("service") else ""
+        choices.append(Choice(f"{tag} {it.get('title', '?')} — {it.get('artist', '?')}{alb}{svc}",
                               (kind, it)))
     choices.append(Choice("← Cancel", "cancel"))
     pick = questionary.select("Result to download:", choices=choices).ask()
