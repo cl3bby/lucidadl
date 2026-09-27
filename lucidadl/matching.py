@@ -21,6 +21,17 @@ _BAD_PHRASES = (
     "made popular", "8d audio", "piano version", "string quartet", "tribute to",
 )
 
+# Release-edition words: not wrong, just usually not the wanted cut. Penalised softly
+# (and capped, so "25th Anniversary Deluxe Remastered Edition" cannot stack into a
+# rejection) so the standard edition wins ties; a query asking for an edition
+# ("Artist - Song Live") skips the penalty via the request-token check.
+_EDITION_TOKENS = {
+    "deluxe", "remastered", "remaster", "anniversary", "expanded", "edition",
+    "live", "bonus", "limited",
+}
+_EDITION_PENALTY = 1.0       # per distinct unrequested edition token
+_EDITION_PENALTY_CAP = 1.5   # total, no matter how many stack
+
 
 def _norm(s: str) -> str:
     return re.sub(r"[^\w\s]", " ", (s or "").lower())
@@ -87,6 +98,10 @@ def score(query: str, item: Dict[str, str]) -> float:
     for b in _BAD_TOKENS:
         if b in blob_tokens and b not in q_tokens:
             s -= 1.5
+    edition_hits = sum(1 for b in _EDITION_TOKENS
+                       if b in blob_tokens and b not in q_tokens)
+    if edition_hits:
+        s -= min(_EDITION_PENALTY_CAP, _EDITION_PENALTY * edition_hits)
     blob = _norm(title) + " " + _norm(ctx)
     nq = _norm(query)
     for ph in _BAD_PHRASES:
