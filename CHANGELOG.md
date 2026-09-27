@@ -7,6 +7,28 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Search no longer depends on Lucida's website. Free-text queries (and playlist
+  tracks, and album links) now search the catalogues directly: Qobuz through its
+  public web API, Amazon Music through its retail digital-music results page. Lucida
+  is used only for what it does well — resolving an item URL into audio. Its former
+  `/search` page was removed server-side (404), which had broken all text search.
+- `-s/--service` is now `auto`, `qobuz`, or `amazon`. `auto` (the default) searches
+  Qobuz first and falls back to Amazon when Qobuz has no good match; naming a service
+  searches exactly that one with no silent fallback. Interactive `lucida search` and
+  the TUI picker run both providers at once in `auto` mode and label every result
+  with its source, so Amazon-only releases show up while browsing.
+- Automatic matching now prefers standard releases: edition words (Deluxe, Remastered,
+  Anniversary, Live, ...) cost a small capped score penalty, so the plain edition wins
+  ties without ever rejecting an edition-only release, and a query asking for the
+  edition still finds it.
+
+### Changed
+- Direct Amazon URLs no longer receive Qobuz's country code: the effective country
+  for Lucida's item-page request and download request comes from the resolved URL's
+  own provider, so `auto` behaves identically to the explicit service for pasted
+  links.
+
+### Added
 - Album links from Spotify, Apple Music, Deezer, and TIDAL now work in batch files and
   the album command: the release's artist and album title are read from the public page
   (no login) and searched on Qobuz/Amazon, the same way playlist tracks already are.

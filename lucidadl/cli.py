@@ -1180,7 +1180,7 @@ async def _debug(query, service, country, item, headless):
     from urllib.parse import urlencode
 
     if not item:
-        click.secho("debug: pass --item <URL> — lucida's /search page no longer "
+        click.secho("debug: pass --item <URL> — lucida's former search page no longer "
                     "exists (catalogue search is provider-side now).", fg="red")
         return
     svc = normalize_service(service)

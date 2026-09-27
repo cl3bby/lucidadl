@@ -1164,6 +1164,276 @@ _version = _runner.invoke(_cli.cli, ["--version"])
 check("cli: source version matches release metadata",
       _version.exit_code == 0 and "1.4.0" in _version.output)
 
+# --- provider catalogue search (Qobuz/Amazon; lucida's /search route is gone) ---
+#
+# Fixtures are trimmed from real live responses: Qobuz catalog/search JSON and the
+# retail Amazon digital-music results page (album row with a physical format, a track
+# row, a vinyl row). The parsers are pure; HTTP is faked at the _public_get seam.
+
+from lucidadl import search as _search
+
+_QOBUZ_PAYLOAD = {
+    "query": "Daft Punk Discovery",
+    "albums": {"total": 2, "items": [{
+        "id": "0724384960650", "slug": "discovery-daft-punk",
+        "title": "Discovery", "version": None, "media_count": 1, "tracks_count": 14,
+        "release_date_original": "2001-03-07", "released_at": 983750400,
+        "artist": {"id": 36819, "name": "Daft Punk"},
+        "artists": [{"id": 36819, "name": "Daft Punk", "roles": ["main-artist"]}],
+        "label": {"name": "Daft Life Ltd. - ADA France"}, "upc": "0724384960650",
+    }]},
+    "tracks": {"total": 16, "items": [
+        {"id": 1068442, "title": "One More Time", "version": "Radio Edit",
+         "performer": {"id": 36819, "name": "Daft Punk"},
+         "album": {"id": "0724384960650", "title": "Discovery",
+                   "artist": {"id": 36819, "name": "Daft Punk"}},
+         "track_number": 1, "isrc": "GBDUW0000053"},
+        {"id": 1068443, "title": "Aerodynamic", "version": None,
+         "performer": {"id": 36819, "name": "Daft Punk"},
+         "album": {"id": "0724384960650", "title": "Discovery"}, "track_number": 2},
+    ]},
+}
+_qres = _search._qobuz_items(_QOBUZ_PAYLOAD)
+_qalb = _qres["albums"][0]
+_qtrk = _qres["tracks"][0]
+check("qobuz search: album URL constructed canonically (us-en/slug/id)",
+      _qalb["url"] == "https://www.qobuz.com/us-en/album/discovery-daft-punk/0724384960650")
+check("qobuz search: album artist + year + track count read",
+      _qalb["artist"] == "Daft Punk" and _qalb["year"] == "2001"
+      and _qalb["track_count"] == 14)
+check("qobuz search: track URL is the open.qobuz.com short link",
+      _qtrk["url"] == "https://open.qobuz.com/track/1068442")
+check("qobuz search: version appended, album title carried",
+      _qtrk["title"] == "One More Time (Radio Edit)" and _qtrk["album"] == "Discovery")
+check("qobuz search: unreadable payload -> empty buckets (fallback proceeds)",
+      _search._qobuz_items(None) == {"tracks": [], "albums": []}
+      and _search._qobuz_items({}) == {"tracks": [], "albums": []})
+
+_AMAZON_SERP = """
+<div data-asin="B0064UPU4G" data-component-type="s-search-result">
+ <h2><span>Discovery</span></h2> <span>by</span> <span>Daft Punk</span>
+ <span>4.8 out of 5 stars</span> <span>MP3 Music</span> <span>Audio CD</span>
+</div>
+<div data-asin="B0064UPUDC" data-component-type="s-search-result">
+ <h2><span>One More Time</span></h2> <span>by</span> <span>Daft Punk</span>
+ <span>MP3 Music</span> <span>Or AUD 1.84 to buy MP3</span>
+</div>
+<div data-asin="B07Q1ZZZZ1" data-component-type="s-search-result">
+ <h2><span>Discovery (Deluxe)</span></h2> <span>by</span> <span>Daft Punk</span>
+ <span>Vinyl</span>
+</div>
+"""
+_amz_albs, _amz_trks = _search._amazon_items(_AMAZON_SERP)
+check("amazon search: rows with physical formats classify as albums",
+      [a["asin"] for a in _amz_albs] == ["B0064UPU4G", "B07Q1ZZZZ1"]
+      and _amz_albs[0]["url"] == "https://music.amazon.com/albums/B0064UPU4G")
+check("amazon search: track rows get /tracks/ ASIN URLs",
+      [t["asin"] for t in _amz_trks] == ["B0064UPUDC"]
+      and _amz_trks[0]["url"] == "https://music.amazon.com/tracks/B0064UPUDC"
+      and _amz_trks[0]["title"] == "One More Time" and _amz_trks[0]["artist"] == "Daft Punk")
+
+_AMAZON_EMPTY = ('<div class="s-no-search-result"><h2>No results for your search '
+                 'query in MP3 Downloads</h2></div>')
+check("amazon search: a recognizable zero-results page is empty, not an error",
+      _search._amazon_items(_AMAZON_EMPTY) == ([], []))
+try:
+    _search._amazon_items("<!DOCTYPE html><html><head><title>&nbsp;</title></head></html>")
+    check("amazon search: an unreadable page raises SearchError", False)
+except _search.SearchError:
+    check("amazon search: an unreadable page raises SearchError", True)
+
+
+class _Resp:
+    def __init__(self, text):
+        self.text = text
+
+
+async def _fake_public_get(url, headers=None):
+    if "/albums/" in url:  # album verification request
+        return _Resp("<h1>Discovery</h1>" if "B0064UPU4G" in url else "<body>shell</body>")
+    return _Resp(_AMAZON_SERP)
+
+
+with _patch.object(_search, "_public_get", _fake_public_get):
+    _amz_res = _aio.run(_search.amazon_search("daft punk discovery"))
+check("amazon search: album candidates verified against music.amazon.com",
+      [a["asin"] for a in _amz_res["albums"]] == ["B0064UPU4G"]
+      and [t["asin"] for t in _amz_res["tracks"]] == ["B0064UPUDC"])
+
+_merged = _search.merge_entries({"albums": [{"url": "q1"}], "tracks": [{"url": "q2"}]},
+                                {"albums": [{"url": "a1"}], "tracks": []})
+check("merge: qobuz rows first, every row tagged with its service",
+      [it["url"] for it in _merged["albums"]] == ["q1", "a1"]
+      and _merged["albums"][0]["service"] == "qobuz"
+      and _merged["albums"][1]["service"] == "amazon")
+
+try:
+    _aio.run(_search.catalog_search("x", "deezer", log=lambda *_: None))
+    check("catalog_search: non-searchable service raises with guidance", False)
+except _search.SearchError as _exc:
+    check("catalog_search: non-searchable service raises with guidance",
+          "auto" in str(_exc) and "qobuz" in str(_exc))
+
+# --- routing: auto vs explicit tiers, direct-URL bypass, URL-derived country ---
+
+from lucidadl.downloader import (_resolve_url as _route, _resolve_targets as _route_t,
+                                 _download_target as _dl_target,
+                                 _effective_country as _eff_cc)
+
+
+class _RoutingClient:
+    """Records every search call and item-page request; Qobuz finds nothing, Amazon
+    returns one good track, so 'auto' must end at Amazon and 'qobuz' at failure."""
+
+    def __init__(self):
+        self.searches = []
+        self.pages = []
+
+    async def search(self, query, service):
+        self.searches.append((query, service))
+        if service == "qobuz":
+            return {"tracks": [], "albums": []}
+        return {"tracks": [{"url": "https://music.amazon.com/tracks/B0GOOD",
+                            "title": "Song", "artist": "Artist",
+                            "context": "Song Artist"}], "albums": []}
+
+    async def fetch_page_data(self, url, country=None):
+        self.pages.append((url, country))
+        return {"info": {"type": "track", "url": url, "title": "Song",
+                         "artists": [{"name": "Artist"}], "producers": ["p"]},
+                "token": "tok", "tokenExpiry": 1}
+
+    tracks_from_pd = staticmethod(LucidaClient.tracks_from_pd)
+
+
+_q = "Artist - Song"
+_rc = _RoutingClient()
+_url = _aio.run(_route(_rc, _q, "auto", "track", lambda *_: None))
+_qobuz_calls = [s for s in _rc.searches if s[1] == "qobuz"]
+_amazon_calls = [s for s in _rc.searches if s[1] == "amazon"]
+check("resolver auto: qobuz exhausted first, amazon second, then a match",
+      _url == "https://music.amazon.com/tracks/B0GOOD"
+      and len(_qobuz_calls) == 4 and len(_amazon_calls) >= 1          # query variants
+      and _qobuz_calls[0] == (_q, "qobuz") and _amazon_calls[0] == (_q, "amazon")
+      and _rc.searches.index(_amazon_calls[0]) > len(_qobuz_calls) - 1)
+
+_rc = _RoutingClient()
+check("resolver: explicit qobuz never falls back to amazon",
+      _aio.run(_route(_rc, _q, "qobuz", "track", lambda *_: None)) is None
+      and _rc.searches and {s[1] for s in _rc.searches} == {"qobuz"})
+
+_rc = _RoutingClient()
+check("resolver: explicit amazon never touches qobuz",
+      _aio.run(_route(_rc, _q, "amazon", "track", lambda *_: None))
+      == "https://music.amazon.com/tracks/B0GOOD"
+      and {s[1] for s in _rc.searches} == {"amazon"})
+
+_DIRECT_URLS = [
+    "https://www.qobuz.com/us-en/album/discovery-daft-punk/0724384960650",
+    "https://open.qobuz.com/track/1068442",
+    "https://music.amazon.com/albums/B0064UPU4G",
+    "https://music.amazon.com/tracks/B0064UPUDC",
+]
+for _line in _DIRECT_URLS:
+    _rc = _RoutingClient()
+    _aio.run(_route(_rc, _line, "auto", "track", lambda *_: None))
+    check(f"direct URL bypasses catalogue search: …{_line.rsplit('/', 1)[-1]}",
+          not _rc.searches and not _rc.pages)
+
+
+def _page_country(line, service, country):
+    rc = _RoutingClient()
+    _aio.run(_route_t(rc, line, "track", service, country, lambda *_: None))
+    return rc.pages[0][1] if rc.pages else "<no page request>"
+
+
+check("country: auto + qobuz album URL keeps the run country",
+      _page_country(_DIRECT_URLS[0], "auto", "US") == "US")
+check("country: auto + qobuz track URL keeps the run country",
+      _page_country(_DIRECT_URLS[1], "auto", "US") == "US")
+check("country: auto + amazon album URL drops the country (like -s amazon)",
+      _page_country(_DIRECT_URLS[2], "auto", "US") == "")
+check("country: auto + amazon track URL drops the country (like -s amazon)",
+      _page_country(_DIRECT_URLS[3], "auto", "US") == "")
+check("country: explicit qobuz + amazon URL still follows the URL",
+      _page_country(_DIRECT_URLS[2], "qobuz", "US") == "")
+check("country: explicit amazon + qobuz URL keeps the run country",
+      _page_country(_DIRECT_URLS[0], "amazon", "US") == "US")
+
+
+class _NullReporter:
+    def start(self, *a):
+        pass
+
+    def status(self, *a):
+        pass
+
+    def progress(self, *a):
+        pass
+
+    def finish(self, *a):
+        pass
+
+    def log(self, *a):
+        pass
+
+
+class _DlClient(_RoutingClient):
+    def __init__(self):
+        super().__init__()
+        self.dl_country = "unset"
+
+    async def start_download(self, track, expiry, country):
+        self.dl_country = country
+        return "handoff", "server"
+
+    async def run_job(self, handoff, server, dest_dir, base_name, **kwargs):
+        _os.makedirs(dest_dir, exist_ok=True)
+        _p = _os.path.join(dest_dir, base_name + ".flac")
+        with open(_p, "wb") as fh:
+            fh.write(b"x")
+        return _p
+
+
+_dl_dir = tempfile.mkdtemp(prefix="lucidadl_dl_country_")
+_dl = _DlClient()
+_dl_totals = {"ok": 0, "skip": 0, "fail": 0}
+_aio.run(_dl_target(
+    _dl, utils.State(_os.path.join(_dl_dir, "state.json")),
+    {"url": "https://music.amazon.com/tracks/B0064UPUDC", "label": "One More Time",
+     "csrf": "c", "expiry": 1, "meta": {}},
+    "US", _os.path.join(_dl_dir, "out"), False, False, None,
+    _NullReporter(), _dl_totals, [], _aio.Lock()))
+check("download: /api/load country is derived from the URL, not the flag",
+      _dl.dl_country == "" and _dl_totals["ok"] == 1)
+
+# --- edition penalty (capped) -------------------------------------------------
+
+_std = {"url": "std", "title": "Song", "artist": "Artist", "context": "Song Artist"}
+_dlx = {"url": "dlx", "title": "Song (Deluxe Edition)", "artist": "Artist",
+        "context": "Song (Deluxe Edition) Artist"}
+_stack = {"url": "stk", "title": "Song (25th Anniversary Deluxe Remastered Edition)",
+          "artist": "Artist",
+          "context": "Song (25th Anniversary Deluxe Remastered Edition) Artist"}
+_req = {"url": "req", "title": "Song Live", "artist": "Artist",
+        "context": "Song Live Artist"}
+check("edition: the standard edition wins a tie with a deluxe",
+      matching.pick_best("Artist - Song", [_dlx, _std]) == "std")
+check("edition: stacked edition words are capped, standard still wins",
+      matching.pick_best("Artist - Song", [_stack, _std]) == "std")
+check("edition: a requested edition word is not penalised",
+      matching.pick_best("Artist - Song Live", [_req, _std]) == "req")
+check("edition: an edition-only release stays above the automatic floor",
+      matching.pick_best("Artist - Song", [_dlx], min_score=5.5, min_margin=0.25) == "dlx")
+
+# --- guard: lucida's /search must not be required anywhere in the normal flow --
+
+from pathlib import Path as _Path
+
+for _mod in ("api", "downloader", "cli", "tui"):
+    _src = (_Path(__file__).parent / "lucidadl" / f"{_mod}.py").read_text(encoding="utf-8")
+    check(f"guard: no /search dependency left in {_mod}.py", "/search" not in _src)
+
 print()
 if fails:
     print(f"{len(fails)} FAILURE(S): {fails}")

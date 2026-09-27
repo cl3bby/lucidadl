@@ -118,6 +118,20 @@ in batch files and the album command — the artist and album title are read fro
 public page and searched on Qobuz/Amazon, just like playlist tracks. YouTube and
 SoundCloud links were already covered by the playlist flow.
 
+**Search that doesn't need Lucida's website.** Lucida removed its search page, so this
+fork searches the catalogues directly: Qobuz through its public web API, Amazon Music
+through its retail digital-music results page. Lucida is only the download backend.
+`-s/--service` picks the tier: `auto` (default) tries Qobuz first and falls back to
+Amazon when there's no good match; `qobuz` or `amazon` searches exactly that service.
+Interactive search runs both at once in `auto` mode and tags each result with its
+source, and it no longer needs the browser — only the actual download does. Matching
+prefers standard releases over Deluxe/Remastered/Live editions (soft, capped — an
+edition-only release still downloads, and asking for the edition still finds it).
+
+Known gaps: track URLs from Spotify, Apple Music, Deezer, and TIDAL can't be downloaded
+by Lucida itself and are not yet converted the way album links are — paste an album
+link or plain text instead. That's upstream behaviour, not a regression.
+
 ## Three ways to download
 
 ### 1. A track or album
