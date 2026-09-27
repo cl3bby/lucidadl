@@ -4,10 +4,10 @@ only ever runs (elsewhere) to obtain/refresh the Cloudflare cf_clearance cookie,
 is then carried by httpx. This keeps downloads fast and RAM-light (no Chromium open).
 
 Flow (all httpx, like the Rust jelni client):
-  search(query)          -> GET /search, parse the SvelteKit JSON5 blob -> results
-  fetch_page_data(url)    -> GET /?url=..., parse blob -> token + every track (csrf)
-  start_download(track)   -> POST /api/load -> {handoff, server}
-  run_job(handoff,server) -> poll <server>.lucida.to (Cloudflare-free) -> stream file
+   search(query)           -> provider catalogue search (Qobuz/Amazon, see search.py)
+   fetch_page_data(url)    -> GET /?url=..., parse blob -> token + every track (csrf)
+   start_download(track)   -> POST /api/load -> {handoff, server}
+   run_job(handoff,server) -> poll <server>.lucida.to (Cloudflare-free) -> stream file
 
 Public Spotify, Deezer, TIDAL, Qobuz, and Amazon Music playlist metadata is normally
 read directly over HTTP. Apple Music, SoundCloud, YouTube, and long Spotify/TIDAL
@@ -31,14 +31,20 @@ from . import paths, utils
 LUCIDA = "https://lucida.to"
 STREAM_ACTION = "/api/fetch/stream/v2"
 
-# SvelteKit data blob delimiters in the RAW HTML (item page AND search page).
+# SvelteKit data blob delimiters in the RAW HTML of the item page.
 _PD_START = ',{"type":"data","data":'
 _PD_END = ',"uses":{"url":1}}];'
+
+# Qobuz's public web-player app id (open.qobuz.com). Not a secret: it ships in the
+# site's own JS and is required by the api.json/0.2 endpoints used for playlists and
+# catalogue search. Long-lived but unofficial — bump it here if Qobuz ever rotates it.
+QOBUZ_APP_ID = "712109809"
 
 SERVICE_ALIASES = {"amazon_music": "amazon", "yandex_music": "yandex"}
 # Qobuz on lucida.to currently only accepts "US"; Amazon works WITHOUT a country.
 COUNTRY_DEFAULTS = {"qobuz": "US", "amazon": "", "deezer": "FR"}
-# Services tried (in order) when the primary one finds nothing (unless --strict).
+# Text-search tiers, in preference order: "auto" means Qobuz first, then Amazon.
+# An explicit service searches that service only. (Direct URLs never search at all.)
 FALLBACK_SERVICES = ["qobuz", "amazon"]
 PLAYLIST_SOURCE_NAMES = {
     "apple": "Apple Music",
@@ -269,29 +275,16 @@ class LucidaClient:
             return r
         raise LucidaError("GET failed after retrying")
 
-    # -- search (httpx) ------------------------------------------------------
+    # -- search (delegates to the provider catalogue layer) -------------------
 
     async def search(self, query: str, service: str) -> Dict[str, List[Dict[str, Any]]]:
-        import pyjson5
+        """Search Qobuz/Amazon for `query` and return {tracks, albums} result dicts.
+        Kept as a client method so the resolver and the selftest's fake clients keep
+        one stable seam; the implementation lives in lucidadl.search and does not
+        touch lucida.to at all."""
+        from .search import catalog_search
 
-        svc = normalize_service(service)
-        cc = default_country(svc)
-        params = {"service": svc}
-        if cc:
-            params["country"] = cc
-        params["query"] = query
-        self.log(f"  searching: {query!r} on {svc}" + (f" ({cc})" if cc else ""))
-        r = await self._get(LUCIDA + "/search", params=params)
-        blob = _between(r.text, _PD_START, _PD_END)
-        if not blob:
-            self.log(f"  (no search data; status {r.status_code})")
-            return {"tracks": [], "albums": [], "artists": []}
-        try:
-            data = pyjson5.loads(blob)
-        except Exception as e:
-            self.log(f"  (search parse: {e})")
-            return {"tracks": [], "albums": [], "artists": []}
-        return _extract_search_results(data)
+        return await catalog_search(query, service, log=self.log)
 
     # -- item page -> token + tracks ----------------------------------------
 
@@ -459,49 +452,6 @@ class LucidaClient:
             i += 1
         self._claimed.add(cand)
         return cand
-
-
-# --- search blob navigation -------------------------------------------------
-
-def _extract_search_results(data: Any) -> Dict[str, List[Dict[str, Any]]]:
-    out = {"tracks": [], "albums": [], "artists": []}
-    node = _find_results_node(data)
-    if not node:
-        return out
-    for kind in ("tracks", "albums"):
-        for it in node.get(kind, []) or []:
-            if not isinstance(it, dict) or not it.get("url"):
-                continue
-            artist = ", ".join(a.get("name", "") for a in (it.get("artists") or [])
-                               if isinstance(a, dict) and a.get("name"))
-            alb = it.get("album") if isinstance(it.get("album"), dict) else {}
-            album = alb.get("title", "")
-            out[kind].append({
-                "url": it["url"], "title": it.get("title", ""), "artist": artist,
-                "album": album, "context": f"{it.get('title', '')} {artist} {album}".strip(),
-            })
-    return out
-
-
-def _find_results_node(obj: Any, depth: int = 0) -> Optional[Dict[str, Any]]:
-    """Find the dict holding the search result lists, wherever it sits in the blob."""
-    if depth > 8:
-        return None
-    if isinstance(obj, dict):
-        for k in ("tracks", "albums"):
-            v = obj.get(k)
-            if isinstance(v, list) and (not v or isinstance(v[0], dict)):
-                return obj
-        for v in obj.values():
-            r = _find_results_node(v, depth + 1)
-            if r:
-                return r
-    elif isinstance(obj, list):
-        for v in obj:
-            r = _find_results_node(v, depth + 1)
-            if r:
-                return r
-    return None
 
 
 # --- public playlist sources ------------------------------------------------
@@ -1020,7 +970,7 @@ async def qobuz_tracklist(url: str, log=print) -> Tuple[str, List[Dict[str, str]
     playlist_id = _playlist_id(url)
     if not playlist_id:
         raise LucidaError("Qobuz playlist ID not found in the URL")
-    headers = {"X-App-Id": "712109809", "Referer": "https://open.qobuz.com/"}
+    headers = {"X-App-Id": QOBUZ_APP_ID, "Referer": "https://open.qobuz.com/"}
     name, tracks, total, read = "", [], 0, 0
     for _ in range(100):
         response = await _public_get(
