@@ -513,16 +513,32 @@ check("apple album extractor: kind suffix is case-insensitive and suffix-free na
                   'content="Random Access Memories by Daft Punk on Apple Music">')
       == ('Daft Punk', 'Random Access Memories'))
 
-# page-data parse recovery: lucida has shipped blobs with junk after the JSON object;
-# the object itself is complete, so trimming back to it must rescue the data
+# page-data parse recovery: lucida's server occasionally corrupts the payload tail
+# (junk after the object, junk inside the tail, a broken or truncated ending) while
+# the JSON5 object itself stays complete, so the data must be trimmed back out
 from lucidadl.api import _json5_object as _j5
 _good = '{"info": {"title": "X", "deep": {"a": [1, 2]}}, "n": null}'
 check("page data recovery: trailing junk after the object is trimmed away",
       _j5(_good + "v")["info"]["title"] == "X")
 check("page data recovery: junk containing braces/strings doesn't confuse the scanner",
       _j5(_good + 'var v = {"decoy": "}"}')["info"]["deep"]["a"] == [1, 2])
-check("page data recovery: an object that never closes stays an error",
-      _alb_raises(_j5, '{"info": {"unterminated": [1, 2'))
+check("page data recovery: junk at a value position recovers (Sept 2026 item pages)",
+      _j5('{"info": {"title": "X"}, "countriesPerService": null, "next": v}')
+      ["info"]["title"] == "X")
+check("page data recovery: junk before the final brace recovers",
+      _j5('{"info": {"title": "X"}, "n": nullv}')["info"]["title"] == "X")
+check("page data recovery: a broken-off final brace recovers",
+      _j5('{"info": {"title": "X"}, "n": nullv')["info"]["title"] == "X")
+check("page data recovery: a tail truncated mid-array is closed out",
+      _j5('{"info": {"unterminated": [1, 2') == {"info": {"unterminated": [1, 2]}})
+check("page data recovery: single-quoted JSON5 strings don't desync the scanner",
+      _j5("{a: '}}', b: 2}v")["b"] == 2)
+try:
+    _j5('{"a": "unclosed')
+    check("page data recovery: unreadable data still fails, one short line", False)
+except _LucidaError as _pderr:
+    check("page data recovery: unreadable data still fails, one short line",
+          len(str(_pderr)) < 80)
 
 import io as _io
 import contextlib as _ctx

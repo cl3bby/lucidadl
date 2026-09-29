@@ -300,7 +300,8 @@ class LucidaClient:
         try:
             return _json5_object(blob)
         except Exception as e:
-            raise LucidaError(f"parse page data: {e}")
+            detail = e.args[0] if e.args else e
+            raise LucidaError(f"parse page data: {detail}") from e
 
     @staticmethod
     def tracks_from_pd(pd: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1487,22 +1488,20 @@ def _between(text: str, start: str, end: str) -> Optional[str]:
 
 def _balanced_object_end(text: str) -> Optional[int]:
     """Index just past the first complete top-level {...} object in `text`, tracking
-    strings and escapes so braces inside them are ignored. None when the object never
-    closes. Used to recover page data that arrives with junk appended after the JSON."""
-    depth = 0
-    in_string = False
-    escaped = False
+    JSON5 strings (both quote styles) and escapes so braces inside them are ignored.
+    None when the object never closes."""
+    depth, quote, escaped = 0, None, False
     for index, char in enumerate(text):
-        if in_string:
+        if quote:
             if escaped:
                 escaped = False
             elif char == "\\":
                 escaped = True
-            elif char == '"':
-                in_string = False
+            elif char == quote:
+                quote = None
             continue
-        if char == '"':
-            in_string = True
+        if char in "\"'":
+            quote = char
         elif char == "{":
             depth += 1
         elif char == "}":
@@ -1512,19 +1511,77 @@ def _balanced_object_end(text: str) -> Optional[int]:
     return None
 
 
+def _open_closers(text: str) -> Optional[str]:
+    """Closing characters for the brackets still open at the end of `text`, or None
+    when the text ends inside a string or nests implausibly deep."""
+    stack, quote, escaped = [], None, False
+    for char in text:
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]":
+            if stack:
+                stack.pop()
+    if quote or len(stack) > 4:
+        return None
+    return "".join(reversed(stack))
+
+
+def _json5_recovery_candidates(blob: str, error: str) -> List[str]:
+    """Parse candidates for a mangled page-data blob, longest first (least data loss).
+    lucida's server occasionally corrupts the payload tail while the JSON5 object
+    itself stays intact, so cutting back to a clean boundary and closing the remaining
+    brackets recovers the data. pyjson5's `near N` anchors mix 0- and 1-based positions
+    across error classes, and tail junk can parse as an unquoted key and move the
+    anchor — so both cuts are tried, the head may drop back past a few mangled pairs,
+    and only a full parse validates a candidate."""
+    candidates = []
+    end = _balanced_object_end(blob)               # junk after a clean object
+    if end:
+        candidates.append(blob[:end])
+    anchors = [int(m.group(1)) for m in re.finditer(r"near (\d+)", error)]
+    anchors.append(len(blob))                      # plain truncation mid-structure
+    for anchor in anchors:
+        for cut in (anchor, anchor - 1):
+            if not 0 < cut <= len(blob):
+                continue
+            head = blob[:cut]
+            for _ in range(4):
+                closers = _open_closers(head)
+                if closers:
+                    candidates.append(head + closers)
+                comma = head.rfind(",")
+                if comma <= 0:
+                    break
+                head = head[:comma]
+    return sorted(set(candidates), key=len, reverse=True)
+
+
 def _json5_object(blob: str) -> Dict[str, Any]:
-    """Parse a JSON5 object, tolerating junk appended after it (lucida's embedded page
-    data has occasionally shipped with trailing characters after the closing brace —
-    the object itself arrives complete, so trimming back to it recovers the data)."""
+    """Parse a JSON5 object, tolerating lucida's occasional tail corruption — stray
+    characters after the closing brace, junk inside the tail, a broken or truncated
+    ending — where the object itself arrives complete, so a bounded trim-and-close
+    recovers the data. Unreadable data still raises."""
     import pyjson5
 
     try:
         return pyjson5.loads(blob)
-    except Exception:
-        pass
-    end = _balanced_object_end(blob)
-    if end:
-        return pyjson5.loads(blob[:end])
+    except Exception as first_error:
+        error = str(first_error)
+    for candidate in _json5_recovery_candidates(blob, error):
+        try:
+            return pyjson5.loads(candidate)
+        except Exception:
+            continue
     raise LucidaError("page data did not contain a readable object")
 
 

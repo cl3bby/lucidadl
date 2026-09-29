@@ -39,6 +39,11 @@ All notable changes to this project are documented here. The format is based on
   release from the download services' search.
 
 ### Fixed
+- Item resolution survives a new flavour of Lucida's page-data corruption: junk inside
+  the payload tail (stray characters where a value or brace belongs, or a truncated
+  ending), not only junk after a complete object. The release's data is trimmed back
+  out of the intact object, so albums like Ren's "Sick Boi" download instead of failing
+  with a wall of "parse page data" output. Parse failures now log one short line.
 - Lucida's embedded page data is now recovered when it arrives with stray characters
   after the JSON object, which intermittently aborted album downloads after a
   successful search ("parse page data: Expected b'JSON5Value' ...").
